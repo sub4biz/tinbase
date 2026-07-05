@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" width="96" alt="tinbase logo"></p>
+
 # tinbase
 
 A pure-JS, Docker-free Supabase backend built on [PGlite](https://pglite.dev) (Postgres compiled to WASM). It speaks the same wire protocols as hosted Supabase, so the **official `@supabase/supabase-js` SDK works unchanged** - REST, Auth, Storage, and Realtime.
@@ -121,6 +123,8 @@ create policy "own rows" on todos
 ```
 
 ## Footprint: tinbase vs PocketBase vs Supabase local
+
+![Memory footprint comparison](assets/footprint.svg)
 
 Measured on an Apple Silicon Mac (48 GB), macOS 15. Same workload for all three: boot with one migrated table, then 1,000 single-row inserts followed by 1,000 filtered list queries. Memory is physical footprint (`vmmap`) for native processes and the sum of `docker stats` for containers. Reproduce with [`bench/footprint.ts`](bench/footprint.ts); raw numbers in [`bench/results.json`](bench/results.json).
 

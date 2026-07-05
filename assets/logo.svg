@@ -1,0 +1,18 @@
+<svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="tin" x1="24" y1="30" x2="96" y2="104" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#10b981"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+  </defs>
+  <!-- can body: the classic database cylinder, tin-sized -->
+  <path d="M24 34v56c0 8.8 16.1 16 36 16s36-7.2 36-16V34" fill="url(#tin)"/>
+  <!-- seam highlights -->
+  <path d="M24 62c0 8.8 16.1 16 36 16s36-7.2 36-16" stroke="#ffffff" stroke-opacity="0.35" stroke-width="4" fill="none"/>
+  <!-- lid -->
+  <ellipse cx="60" cy="34" rx="36" ry="16" fill="#34d399"/>
+  <ellipse cx="60" cy="34" rx="36" ry="16" stroke="#065f46" stroke-opacity="0.25" stroke-width="2"/>
+  <!-- pull tab -->
+  <circle cx="72" cy="31" r="7" fill="none" stroke="#065f46" stroke-width="4"/>
+  <rect x="54" y="27.5" width="14" height="5" rx="2.5" fill="#065f46" transform="rotate(8 54 30)"/>
+</svg>
