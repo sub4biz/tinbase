@@ -77,6 +77,10 @@ export default function Home() {
           <code className="mt-8 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-2.5 font-mono text-sm text-emerald-300">
             npx tinbase start
           </code>
+          <p className="mt-6 flex items-center gap-2 text-sm text-amber-400/90">
+            <span aria-hidden="true">⚠</span> Experimental — great for prototypes, local dev, and
+            embedded use. Not meant for production yet.
+          </p>
         </section>
 
         {/* benchmark */}

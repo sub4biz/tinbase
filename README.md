@@ -6,6 +6,9 @@ A pure-JS, Docker-free Supabase backend built on [PGlite](https://pglite.dev) (P
 
 One command, one small binary, real Postgres with Row Level Security - and 1:1 with Supabase's APIs and migration conventions.
 
+> [!WARNING]
+> **Experimental.** tinbase is young and moving fast - great for prototypes, local development, demos, and embedded/browser use. It is **not meant for production usage** yet.
+
 ```
 npx tinbase start
 ```

@@ -52,6 +52,12 @@ export default function Docs() {
         <main className="min-w-0 max-w-3xl space-y-6">
           <h1 className="text-4xl font-bold tracking-tight">Documentation</h1>
 
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            <strong className="font-semibold">Experimental.</strong> tinbase is young and moving
+            fast — great for prototypes, local development, demos, and embedded/browser use. It is
+            not meant for production usage yet.
+          </div>
+
           <H2 id="getting-started">Getting started</H2>
           <P>
             tinbase is a Supabase-compatible backend in a single process. In a project with a{' '}
