@@ -1,5 +1,6 @@
 import { SiteNav } from '@/components/site-nav'
 import { Code } from '@/components/code'
+import { FootprintChart } from '@/components/footprint-chart'
 
 const SECTIONS = [
   { id: 'getting-started', label: 'Getting started' },
@@ -173,6 +174,47 @@ const supabase = createClient('http://localhost', backend.anonKey, {
 
           <H2 id="benchmarks">Benchmarks</H2>
           <P>
+            Same workload for every backend: boot with one migrated table, then 1,000 single-row
+            inserts followed by 1,000 filtered list queries. Memory is the physical footprint of the
+            whole process tree (vmmap) for native processes and the sum of docker stats for
+            containers. Apple Silicon, macOS 15.
+          </P>
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-6">
+            <FootprintChart />
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead>
+                <tr className="border-b border-zinc-800 text-left text-zinc-300">
+                  <th className="py-2 pr-4 font-semibold"></th>
+                  <th className="py-2 pr-4 font-semibold text-emerald-400">tinbase (binary)</th>
+                  <th className="py-2 pr-4 font-semibold text-emerald-400">tinbase (wasm)</th>
+                  <th className="py-2 pr-4 font-semibold">PocketBase</th>
+                  <th className="py-2 font-semibold">Supabase local</th>
+                </tr>
+              </thead>
+              <tbody className="text-zinc-400">
+                {[
+                  ['Database', 'real Postgres 17 + RLS', 'real Postgres (PGlite) + RLS', 'SQLite', 'Postgres 17'],
+                  ['Memory at boot', '44 MB', '573 MB', '16 MB', '1,441 MB'],
+                  ['Memory under load', '64 MB', '347 MB', '25 MB', '1,626 MB'],
+                  ['Data on disk (1k rows)', '38 MB', '39 MB', '7 MB', '70 MB'],
+                  ['Install size', '92 MB, no runtime', '26 MB + Node', '30 MB', '2,291 MB + Docker'],
+                  ['Processes', '2', '1', '1', '12 containers'],
+                  ['1,000 inserts', '0.4 s', '0.8 s', '0.3 s', '1.1 s'],
+                  ['1,000 filtered reads', '0.4 s', '0.8 s', '0.3 s', '1.0 s'],
+                ].map(([label, ...cells]) => (
+                  <tr key={label} className="border-b border-zinc-800/60">
+                    <td className="py-2 pr-4 font-medium text-zinc-200">{label}</td>
+                    {cells.map((c, i) => (
+                      <td key={i} className={'py-2 pr-4' + (i < 2 ? ' text-zinc-200' : '')}>{c}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <P>
             Methodology, raw numbers, and a reproducible script live in the repo:{' '}
             <a className="text-emerald-400 hover:text-emerald-300" href="https://github.com/sanketsahu/tinbase/blob/main/bench/footprint.ts">
               bench/footprint.ts
@@ -181,9 +223,7 @@ const supabase = createClient('http://localhost', backend.anonKey, {
             <a className="text-emerald-400 hover:text-emerald-300" href="https://github.com/sanketsahu/tinbase/blob/main/bench/results.json">
               bench/results.json
             </a>
-            . Summary: tinbase (binary, real Postgres with RLS) 44 MB boot / 64 MB under load;
-            PocketBase (SQLite) 16 / 25 MB; Supabase local (Postgres) 1,441 / 1,626 MB across 12
-            containers.
+            .
           </P>
         </main>
       </div>
