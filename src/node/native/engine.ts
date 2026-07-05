@@ -1,0 +1,195 @@
+/**
+ * Native embedded Postgres engine — PocketBase-class footprint with real
+ * Postgres semantics. Downloads platform binaries once (~12 MB from
+ * theseus-rs/postgresql-binaries), runs initdb with memory-lean settings,
+ * and manages the postgres child process. Trust auth over a private unix
+ * socket directory (0700), never TCP.
+ */
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { DbEngine, EngineResults, EngineTx } from '../../db/engine.js'
+import { Mutex } from '../../db/engine.js'
+import { PgWireClient } from './wire.js'
+
+const DEFAULT_PG_VERSION = '17.7.0'
+
+export interface NativeEngineOptions {
+  /** Postgres data directory (created + initdb'd if missing). */
+  dataDir: string
+  /** Postgres version tag from theseus-rs/postgresql-binaries. */
+  version?: string
+  /** Where downloaded binaries are cached. Default ~/.cache/tinbase */
+  cacheDir?: string
+  log?: (msg: string) => void
+}
+
+function target(): string {
+  const arch = process.arch === 'arm64' ? 'aarch64' : process.arch === 'x64' ? 'x86_64' : null
+  if (!arch) throw new Error(`unsupported architecture for native engine: ${process.arch}`)
+  if (process.platform === 'darwin') return `${arch}-apple-darwin`
+  if (process.platform === 'linux') return `${arch}-unknown-linux-gnu`
+  throw new Error(`unsupported platform for native engine: ${process.platform} (use the default PGlite engine)`)
+}
+
+/** Download + unpack Postgres binaries if not already cached. Returns the install dir. */
+export async function ensurePostgres(version = DEFAULT_PG_VERSION, cacheDir?: string, log?: (m: string) => void): Promise<string> {
+  const t = target()
+  const root = cacheDir ?? join(homedir(), '.cache', 'tinbase')
+  const dir = join(root, `postgresql-${version}-${t}`)
+  if (existsSync(join(dir, 'bin', 'postgres'))) return dir
+
+  const url = `https://github.com/theseus-rs/postgresql-binaries/releases/download/${version}/postgresql-${version}-${t}.tar.gz`
+  log?.(`downloading postgres ${version} (${t})…`)
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`failed to download ${url}: HTTP ${res.status}`)
+  mkdirSync(dir, { recursive: true })
+  const tarball = join(root, `pg-${version}.tar.gz`)
+  await writeFile(tarball, Buffer.from(await res.arrayBuffer()))
+  execFileSync('tar', ['xzf', tarball, '-C', dir, '--strip-components=1'])
+  rmSync(tarball, { force: true })
+  log?.(`postgres installed to ${dir}`)
+  return dir
+}
+
+const TUNED_CONF = `
+# tinbase: memory-lean settings for an embedded, single-app Postgres
+listen_addresses = ''
+shared_buffers = 16MB
+dynamic_shared_memory_type = posix
+max_connections = 10
+wal_level = minimal
+max_wal_senders = 0
+synchronous_commit = off
+logging_collector = off
+`
+
+export async function createNativeEngine(opts: NativeEngineOptions): Promise<DbEngine> {
+  const installDir = await ensurePostgres(opts.version, opts.cacheDir, opts.log)
+  const bin = (name: string) => join(installDir, 'bin', name)
+
+  // initdb on first boot
+  if (!existsSync(join(opts.dataDir, 'PG_VERSION'))) {
+    mkdirSync(opts.dataDir, { recursive: true })
+    execFileSync(bin('initdb'), ['-U', 'postgres', '-A', 'trust', '-E', 'UTF8', '-D', opts.dataDir], {
+      stdio: 'ignore',
+    })
+    appendFileSync(join(opts.dataDir, 'postgresql.conf'), TUNED_CONF)
+  }
+
+  // private socket dir — trust auth is safe because only this user can reach it
+  const sockDir = mkdtempSync(join(tmpdir(), 'tinbase-pg-'))
+  chmodSync(sockDir, 0o700)
+
+  const child: ChildProcess = spawn(bin('postgres'), ['-D', opts.dataDir, '-k', sockDir], {
+    stdio: 'ignore',
+    detached: false,
+  })
+  let childExited = false
+  child.on('exit', () => (childExited = true))
+
+  const socketPath = join(sockDir, '.s.PGSQL.5432')
+  const connect = async (): Promise<PgWireClient> => {
+    const deadline = Date.now() + 20_000
+    for (;;) {
+      try {
+        return await PgWireClient.connect({ socketPath, user: 'postgres', database: 'postgres' })
+      } catch (e) {
+        if (childExited) throw new Error('postgres exited during startup')
+        if (Date.now() > deadline) throw e
+        await new Promise((r) => setTimeout(r, 150))
+      }
+    }
+  }
+
+  const main = await connect()
+  const listener = await connect()
+
+  const mutex = new Mutex()
+  const listeners = new Map<string, Set<(payload: string) => void>>()
+  listener.onNotification = (channel, payload) => {
+    for (const cb of listeners.get(channel) ?? []) cb(payload)
+  }
+
+  const tx: EngineTx = {
+    async query<T>(sql: string, params?: unknown[]): Promise<EngineResults<T>> {
+      const res = await main.query<T>(sql, normalizeParams(params))
+      return { rows: res.rows, affectedRows: res.affectedRows }
+    },
+    async exec(sql: string): Promise<void> {
+      await main.exec(sql)
+    },
+  }
+
+  return {
+    query<T>(sql: string, params?: unknown[]): Promise<EngineResults<T>> {
+      return mutex.run(() => tx.query<T>(sql, params))
+    },
+    exec(sql: string): Promise<void> {
+      return mutex.run(() => tx.exec(sql))
+    },
+    transaction<T>(fn: (t: EngineTx) => Promise<T>): Promise<T> {
+      return mutex.run(async () => {
+        await main.exec('begin')
+        try {
+          const result = await fn(tx)
+          await main.exec('commit')
+          return result
+        } catch (e) {
+          await main.exec('rollback').catch(() => {})
+          throw e
+        }
+      })
+    },
+    async listen(channel: string, cb: (payload: string) => void): Promise<() => void> {
+      if (!listeners.has(channel)) {
+        listeners.set(channel, new Set())
+        await listener.exec(`listen "${channel.replaceAll('"', '""')}"`)
+      }
+      listeners.get(channel)!.add(cb)
+      return () => listeners.get(channel)?.delete(cb)
+    },
+    async close(): Promise<void> {
+      await main.close().catch(() => {})
+      await listener.close().catch(() => {})
+      if (!childExited) {
+        child.kill('SIGINT') // fast shutdown
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(() => {
+            child.kill('SIGKILL')
+            resolve()
+          }, 5000)
+          child.on('exit', () => {
+            clearTimeout(t)
+            resolve()
+          })
+        })
+      }
+      rmSync(sockDir, { recursive: true, force: true })
+    },
+  }
+}
+
+/** Match PGlite's param serialization: arrays → pg literals, objects → JSON. */
+function normalizeParams(params?: unknown[]): unknown[] | undefined {
+  return params?.map((p) => {
+    if (p === null || p === undefined) return null
+    if (Array.isArray(p)) return toPgArrayLiteral(p)
+    if (p instanceof Date) return p.toISOString()
+    if (typeof p === 'object') return JSON.stringify(p)
+    return p
+  })
+}
+
+function toPgArrayLiteral(arr: unknown[]): string {
+  const items = arr.map((el): string => {
+    if (el === null || el === undefined) return 'NULL'
+    if (Array.isArray(el)) return toPgArrayLiteral(el)
+    if (typeof el === 'number' || typeof el === 'boolean') return String(el)
+    const s = typeof el === 'object' ? JSON.stringify(el) : String(el)
+    return `"${s.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
+  })
+  return `{${items.join(',')}}`
+}

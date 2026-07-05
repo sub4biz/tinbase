@@ -76,7 +76,18 @@ export interface TestEnv {
 }
 
 export async function createTestEnv(): Promise<TestEnv> {
+  // TINBASE_TEST_ENGINE=native runs the whole suite on embedded Postgres
+  let engine
+  if (process.env.TINBASE_TEST_ENGINE === 'native') {
+    const { createNativeEngine } = await import('../src/node/native/engine.js')
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    engine = await createNativeEngine({ dataDir: join(mkdtempSync(join(tmpdir(), 'tinbase-test-')), 'pgdata') })
+  }
+
   const backend = await createBackend({
+    engine,
     migrations: [{ name: '20240101000000_test_schema', sql: TEST_MIGRATION }],
     seedSql: TEST_SEED,
   })

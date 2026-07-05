@@ -1,5 +1,6 @@
-import { PGlite, type Transaction, type Results } from '@electric-sql/pglite'
 import { BOOTSTRAP_SQL } from './bootstrap.js'
+import { createPgliteEngine } from './pglite-engine.js'
+import type { DbEngine, EngineResults, EngineTx } from './engine.js'
 import type { MigrationFile, RequestContext } from '../types.js'
 
 export interface ColumnInfo {
@@ -47,7 +48,7 @@ export interface SchemaInfo {
   foreignKeys: ForeignKey[]
 }
 
-export type Querier = (sql: string, params?: unknown[]) => Promise<Results>
+export type Querier = (sql: string, params?: unknown[]) => Promise<EngineResults>
 
 export interface CdcEvent {
   schema: string
@@ -65,22 +66,25 @@ export class Database {
   private cdcListeners = new Set<(e: CdcEvent) => void>()
   private cdcStarted = false
 
-  private constructor(public pg: PGlite) {}
+  private constructor(public engine: DbEngine) {}
 
-  static async create(dataDir?: string): Promise<Database> {
-    const pg = dataDir ? new PGlite(dataDir) : new PGlite()
-    await pg.waitReady
-    await pg.exec(BOOTSTRAP_SQL)
-    return new Database(pg)
+  /** Create a Database on PGlite (default) or any custom DbEngine. */
+  static async create(dataDirOrEngine?: string | DbEngine): Promise<Database> {
+    const engine =
+      dataDirOrEngine && typeof dataDirOrEngine === 'object'
+        ? dataDirOrEngine
+        : await createPgliteEngine(dataDirOrEngine)
+    await engine.exec(BOOTSTRAP_SQL)
+    return new Database(engine)
   }
 
   /** Superuser query — used by auth/storage internals and introspection. */
-  query(sql: string, params?: unknown[]): Promise<Results> {
-    return this.pg.query(sql, params)
+  query<T = any>(sql: string, params?: unknown[]): Promise<EngineResults<T>> {
+    return this.engine.query<T>(sql, params)
   }
 
   exec(sql: string): Promise<unknown> {
-    return this.pg.exec(sql)
+    return this.engine.exec(sql)
   }
 
   /**
@@ -89,7 +93,7 @@ export class Database {
    * like hosted Supabase.
    */
   async withContext<T>(ctx: RequestContext, fn: (q: Querier) => Promise<T>): Promise<T> {
-    return this.pg.transaction(async (tx: Transaction) => {
+    return this.engine.transaction(async (tx: EngineTx) => {
       await tx.query(
         `select set_config('role', $1, true),
                 set_config('request.jwt.claims', $2, true)`,
@@ -106,12 +110,12 @@ export class Database {
     const sorted = [...migrations].sort((a, b) => a.name.localeCompare(b.name))
     for (const m of sorted) {
       const version = m.name.match(/^(\d+)/)?.[1] ?? m.name
-      const seen = await this.pg.query(
+      const seen = await this.engine.query(
         `select 1 from supabase_migrations.schema_migrations where version = $1`,
         [version]
       )
       if (seen.rows.length > 0) continue
-      await this.pg.transaction(async (tx) => {
+      await this.engine.transaction(async (tx) => {
         await tx.exec(m.sql)
         await tx.query(
           `insert into supabase_migrations.schema_migrations (version, name, statements)
@@ -123,12 +127,12 @@ export class Database {
     }
     if (seedSql) {
       const hash = await sha256Hex(seedSql)
-      const seen = await this.pg.query(
+      const seen = await this.engine.query(
         `select 1 from supabase_migrations.seed_files where path = 'supabase/seed.sql' and hash = $1`,
         [hash]
       )
       if (seen.rows.length === 0) {
-        await this.pg.transaction(async (tx) => {
+        await this.engine.transaction(async (tx) => {
           await tx.exec(seedSql)
           await tx.query(
             `insert into supabase_migrations.seed_files (path, hash) values ('supabase/seed.sql', $1)
@@ -144,7 +148,7 @@ export class Database {
   }
 
   async listAppliedMigrations(): Promise<{ version: string; name: string | null }[]> {
-    const res = await this.pg.query<{ version: string; name: string | null }>(
+    const res = await this.engine.query<{ version: string; name: string | null }>(
       `select version, name from supabase_migrations.schema_migrations order by version`
     )
     return res.rows
@@ -161,7 +165,7 @@ export class Database {
     const cached = this.schemaCache.get(schema)
     if (cached) return cached
 
-    const cols = await this.pg.query<{
+    const cols = await this.engine.query<{
       table_name: string
       column_name: string
       udt_name: string
@@ -176,7 +180,7 @@ export class Database {
       [schema]
     )
 
-    const pks = await this.pg.query<{ table_name: string; column_name: string }>(
+    const pks = await this.engine.query<{ table_name: string; column_name: string }>(
       `select kcu.table_name, kcu.column_name
        from information_schema.table_constraints tc
        join information_schema.key_column_usage kcu
@@ -186,7 +190,7 @@ export class Database {
       [schema]
     )
 
-    const fks = await this.pg.query<{
+    const fks = await this.engine.query<{
       constraint_name: string
       src_schema: string
       src_table: string
@@ -269,7 +273,7 @@ export class Database {
     const key = `${schema}.${name}`
     const cached = this.fnCache.get(key)
     if (cached) return cached
-    const res = await this.pg.query<{
+    const res = await this.engine.query<{
       name: string
       returns_set: boolean
       return_type: string
@@ -302,7 +306,7 @@ export class Database {
   async ensureCdcTrigger(schema: string, table: string): Promise<void> {
     const s = quoteIdent(schema)
     const t = quoteIdent(table)
-    await this.pg.exec(`
+    await this.engine.exec(`
       do $$ begin
         if not exists (
           select from pg_trigger tg
@@ -324,7 +328,7 @@ export class Database {
     this.cdcListeners.add(cb)
     if (!this.cdcStarted) {
       this.cdcStarted = true
-      await this.pg.listen('tinbase_cdc', (payload: string) => {
+      await this.engine.listen('tinbase_cdc', (payload: string) => {
         try {
           const event = JSON.parse(payload) as CdcEvent
           for (const listener of this.cdcListeners) listener(event)
@@ -337,7 +341,7 @@ export class Database {
   }
 
   async close(): Promise<void> {
-    await this.pg.close()
+    await this.engine.close()
   }
 }
 

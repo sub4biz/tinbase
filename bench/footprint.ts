@@ -62,6 +62,36 @@ function rssTreeMb(rootPid: number): number {
   return Math.round((parseInt(out, 10) / 1024) * 10) / 10
 }
 
+function descendants(rootPid: number): number[] {
+  const lines = execSync(`ps -axo pid=,ppid=`).toString().trim().split('\n')
+  const children = new Map<number, number[]>()
+  for (const line of lines) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number)
+    if (!children.has(ppid)) children.set(ppid, [])
+    children.get(ppid)!.push(pid)
+  }
+  const out: number[] = []
+  const stack = [rootPid]
+  while (stack.length) {
+    const pid = stack.pop()!
+    out.push(pid)
+    stack.push(...(children.get(pid) ?? []))
+  }
+  return out
+}
+
+function treeFootprintMb(rootPid: number): number {
+  let total = 0
+  for (const pid of descendants(rootPid)) {
+    try {
+      total += rssTreeMb(pid)
+    } catch {
+      // process may have exited between listing and measuring
+    }
+  }
+  return Math.round(total * 10) / 10
+}
+
 function duMb(path: string): number {
   const out = execSync(`du -sk "${path}"`).toString().trim()
   return Math.round((parseInt(out, 10) / 1024) * 10) / 10
@@ -159,6 +189,55 @@ async function benchTinbase(): Promise<void> {
   } finally {
     proc.kill('SIGTERM')
     await sleep(500)
+    proc.kill('SIGKILL')
+  }
+}
+
+// ── target: tinbase-native ─────────────────────────────────────────────────
+
+async function benchTinbaseNative(): Promise<void> {
+  const dir = join(import.meta.dirname, '.tmp-tinbase-native')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(join(dir, 'supabase', 'migrations'), { recursive: true })
+  writeFileSync(join(dir, 'supabase', 'migrations', '20240101000000_bench.sql'), BENCH_TABLE_SQL)
+
+  const port = 54442
+  const proc = spawn('node', ['dist/cli.js', 'start', '--dir', dir, '--engine', 'native', '--port', String(port)], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let banner = ''
+  proc.stdout.on('data', (d) => (banner += d.toString()))
+
+  try {
+    await waitForHttp(`http://127.0.0.1:${port}/health`, 120_000)
+    await sleep(2000)
+    const bootRssMb = treeFootprintMb(proc.pid!)
+
+    const anonKey = banner.match(/anon key: (\S+)/)?.[1]
+    if (!anonKey) throw new Error('anon key not found in banner')
+
+    const { insertSecs, readSecs } = await supabaseJsWorkload(`http://127.0.0.1:${port}`, anonKey)
+    await sleep(1000)
+    const workloadRssMb = treeFootprintMb(proc.pid!)
+    const dataDiskMb = duMb(join(dir, '.tinbase'))
+    const { homedir } = await import('node:os')
+    const cache = execSync(`ls -d ${homedir()}/.cache/tinbase/postgresql-* | head -1`).toString().trim()
+    const installDiskMb = duMb(cache) + duMb('dist')
+
+    saveResult({
+      target: 'tinbase-native',
+      bootRssMb,
+      workloadRssMb,
+      dataDiskMb,
+      installDiskMb,
+      insertSecs,
+      readSecs,
+      notes: 'node server + embedded native postgres process tree; install = postgres binaries + dist (excludes Node runtime)',
+      measuredAt: new Date().toISOString(),
+    })
+  } finally {
+    proc.kill('SIGTERM')
+    await sleep(1500)
     proc.kill('SIGKILL')
   }
 }
@@ -349,6 +428,7 @@ async function benchSupabase(): Promise<void> {
 
 const target = process.argv[2]
 if (target === 'tinbase') await benchTinbase()
+else if (target === 'tinbase-native') await benchTinbaseNative()
 else if (target === 'pocketbase') await benchPocketbase()
 else if (target === 'supabase') await benchSupabase()
 else {

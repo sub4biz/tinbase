@@ -31,5 +31,16 @@
     "readSecs": 1.038,
     "notes": "sum of docker stats for all supabase_* containers (default local stack); install = sum of docker image sizes (excludes Docker Desktop itself)",
     "measuredAt": "2026-07-05T14:57:49.061Z"
+  },
+  {
+    "target": "tinbase-native",
+    "bootRssMb": 52.9,
+    "workloadRssMb": 95.8,
+    "dataDiskMb": 38.4,
+    "installDiskMb": 34.7,
+    "insertSecs": 0.53,
+    "readSecs": 0.429,
+    "notes": "node server + embedded native postgres process tree; install = postgres binaries + dist (excludes Node runtime)",
+    "measuredAt": "2026-07-05T15:34:48.482Z"
   }
 ]

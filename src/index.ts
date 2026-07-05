@@ -51,7 +51,7 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
   const siteUrl = config.siteUrl ?? 'http://localhost:54321'
   const jwtExpiry = config.jwtExpiry ?? 3600
 
-  const db = await Database.create(config.dataDir)
+  const db = await Database.create(config.engine ?? config.dataDir)
   if (config.migrations?.length || config.seedSql) {
     const applied = await db.runMigrations(config.migrations ?? [], config.seedSql)
     if (applied.length > 0) config.log?.(`applied migrations: ${applied.join(', ')}`)

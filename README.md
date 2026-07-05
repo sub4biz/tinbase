@@ -10,6 +10,7 @@ npx tinbase start
 
 - **No Docker, no external services.** One runtime dependency: `@electric-sql/pglite`.
 - **Real Postgres semantics.** RLS policies, `auth.uid()`, triggers, FKs - it is Postgres.
+- **Two engines, one API.** Default is PGlite (WASM Postgres - portable, browser-ready). `--engine native` runs an embedded native Postgres instead: ~53 MB of RAM at boot, PocketBase-class footprint, zero semantic differences.
 - **Supabase CLI migration conventions.** Reads `supabase/migrations/*.sql` and `supabase/seed.sql`; tracks them in `supabase_migrations.schema_migrations`. Your migration files stay portable to hosted Supabase.
 - **Browser-ready core.** Every service is a pure `(Request) => Response` fetch handler. In Node it's served over HTTP; in the browser you can hand it to supabase-js as a custom `fetch` and run the whole backend in-process (PGlite already runs in the browser via IndexedDB/OPFS).
 
@@ -53,8 +54,16 @@ tinbase keys       # print anon / service_role keys
       --dir <path>      project dir containing supabase/ (default cwd)
       --data-dir <path> PGlite data dir (default <dir>/.tinbase/db)
       --jwt-secret <s>  JWT secret (or TINBASE_JWT_SECRET)
-      --memory          in-memory database, no persistence
+      --memory          in-memory database, no persistence (wasm engine)
+      --engine <e>      wasm (default) or native
 ```
+
+### Engines
+
+- **wasm** (default): PGlite. Zero setup, runs anywhere Node runs - and in the browser. Costs ~350 MB RAM.
+- **native**: embedded native Postgres 17. First run downloads platform binaries (~12 MB, from [theseus-rs/postgresql-binaries](https://github.com/theseus-rs/postgresql-binaries), cached in `~/.cache/tinbase`), then `initdb` with memory-lean settings. ~53 MB RAM at boot. Listens only on a private unix socket (0700 dir, trust auth) - never TCP. macOS/Linux on x64/arm64; on Windows use wasm.
+
+Both engines run the identical bootstrap, migrations, RLS, and realtime CDC - the test suite passes on both (`TINBASE_TEST_ENGINE=native npm test`).
 
 ## Embedding (Node or browser)
 
@@ -105,25 +114,25 @@ create policy "own rows" on todos
 
 Measured on an Apple Silicon Mac (48 GB), macOS 15. Same workload for all three: boot with one migrated table, then 1,000 single-row inserts followed by 1,000 filtered list queries. Memory is physical footprint (`vmmap`) for native processes and the sum of `docker stats` for containers. Reproduce with [`bench/footprint.ts`](bench/footprint.ts); raw numbers in [`bench/results.json`](bench/results.json).
 
-| | tinbase | PocketBase v0.39.5 | Supabase local (CLI 2.40) |
-| --- | --- | --- | --- |
-| Runtime memory at boot | 573 MB | 16 MB | 1,441 MB |
-| Runtime memory after workload | 347 MB¹ | 25 MB | 1,626 MB |
-| Data on disk (1k rows) | 39 MB | 7 MB | 70 MB |
-| Install size | 26 MB² | 30 MB | 2,291 MB³ |
-| Processes | 1 | 1 | 12 containers + Docker |
-| 1,000 inserts | 0.8 s | 0.3 s | 1.1 s |
-| 1,000 filtered reads | 0.8 s | 0.3 s | 1.0 s |
+| | tinbase (native) | tinbase (wasm) | PocketBase v0.39.5 | Supabase local (CLI 2.40) |
+| --- | --- | --- | --- | --- |
+| Runtime memory at boot | 53 MB | 573 MB | 16 MB | 1,441 MB |
+| Runtime memory after workload | 96 MB | 347 MB¹ | 25 MB | 1,626 MB |
+| Data on disk (1k rows) | 38 MB | 39 MB | 7 MB | 70 MB |
+| Install size | 35 MB² | 26 MB² | 30 MB | 2,291 MB³ |
+| Processes | 2 (node + postgres) | 1 | 1 | 12 containers + Docker |
+| 1,000 inserts | 0.5 s | 0.8 s | 0.3 s | 1.1 s |
+| 1,000 filtered reads | 0.4 s | 0.8 s | 0.3 s | 1.0 s |
 
 ¹ PGlite's WASM instantiation peaks at boot, then the OS reclaims pages; steady state under load is ~350 MB.
-² `dist` + `@electric-sql/pglite`, excluding the Node runtime you already have.
+² Native: unpacked Postgres 17 binaries + `dist`. Wasm: `dist` + `@electric-sql/pglite`. Both exclude the Node runtime you already have.
 ³ Sum of the Docker image sizes the default local stack runs, excluding Docker Desktop itself.
 
 **How to read this honestly:**
 
-- **vs Supabase local**: same SDK, same APIs, ~2.5-4x less memory, ~90x smaller install, one process instead of a 12-container stack, and boots in ~2 s instead of a minute. That's the entire point of the project.
-- **vs PocketBase**: PocketBase is dramatically lighter at runtime - a Go binary embedding SQLite simply costs less than Postgres compiled to WASM on Node. If you want the smallest possible backend and don't need Supabase compatibility, PocketBase is the better tool. tinbase's trade is spending ~350 MB of RAM to get *real Postgres* (RLS, jsonb, FKs, triggers, real SQL migrations) plus wire-compatibility with supabase-js - so the same code and the same migration files move to hosted Supabase when you outgrow local.
-- tinbase's memory is almost entirely the PGlite WASM heap; the API layers add single-digit MB.
+- **vs Supabase local**: same SDK, same APIs, ~15-27x less memory (native engine), ~65x smaller install, 2 processes instead of a 12-container stack, and boots in ~2 s instead of a minute. That's the entire point of the project.
+- **vs PocketBase**: with the native engine, tinbase lands in PocketBase's weight class - ~3x the RAM and install-size parity - while running *real Postgres* (RLS, jsonb, FKs, triggers) behind Supabase's exact wire APIs, so your code and migration files move to hosted Supabase unchanged. PocketBase is still the lightest option if you don't need any of that.
+- The wasm engine's memory is almost entirely the PGlite WASM heap; the API layers add single-digit MB. Use it where portability matters (browser, one-dependency installs); use `--engine native` on servers.
 
 ## How complete is it?
 
@@ -145,7 +154,7 @@ Rough coverage of the supabase-js SDK surface, measured against what each sub-li
 - Spread embeds (`...rel(col)`) support flat column lists only; aggregate functions in `select` are not implemented.
 - Auth: no OAuth providers, magic links, or OTP (endpoints accept and no-op); no email delivery.
 - `pg_notify` payloads cap at ~8 kB - realtime events for larger rows arrive with `record: null` and an `errors` entry, like Supabase's "payload too large".
-- One writer at a time (PGlite is single-connection); requests are serialized through a transaction queue. Fine for dev tools and small apps, not for high-concurrency production.
+- One writer at a time: PGlite is single-connection, and the native engine currently serializes requests over one connection for parity (a connection pool is a straightforward future upgrade). Fine for dev tools and small apps, not for high-concurrency production.
 
 ## Tests
 

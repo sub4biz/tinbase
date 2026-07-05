@@ -10,6 +10,7 @@
 import { mkdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { createBackend } from './index.js'
+import { createNativeEngine } from './node/native/engine.js'
 import { FsStorageDriver } from './node/fs-driver.js'
 import { loadSupabaseProject } from './node/project.js'
 import { serve } from './node/server.js'
@@ -25,6 +26,7 @@ interface CliOptions {
   storageDir: string
   jwtSecret: string
   memory: boolean
+  engine: 'wasm' | 'native'
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -39,6 +41,7 @@ function parseArgs(argv: string[]): CliOptions {
     storageDir: '',
     jwtSecret: process.env.TINBASE_JWT_SECRET ?? DEFAULT_JWT_SECRET,
     memory: false,
+    engine: (process.env.TINBASE_ENGINE as 'wasm' | 'native') ?? 'wasm',
   }
   for (let i = 0; i < args.length; i++) {
     const a = args[i]
@@ -50,6 +53,14 @@ function parseArgs(argv: string[]): CliOptions {
     else if (a === '--storage-dir') opts.storageDir = resolve(next())
     else if (a === '--jwt-secret') opts.jwtSecret = next()
     else if (a === '--memory') opts.memory = true
+    else if (a === '--engine') {
+      const v = next()
+      if (v !== 'wasm' && v !== 'native') {
+        console.error(`--engine must be wasm or native, got: ${v}`)
+        process.exit(1)
+      }
+      opts.engine = v
+    }
     else if (a === '--help' || a === '-h') {
       printHelp()
       process.exit(0)
@@ -81,7 +92,9 @@ Options:
       --data-dir <path> PGlite data directory (default <dir>/.tinbase/db)
       --storage-dir <p> storage files directory (default <dir>/.tinbase/storage)
       --jwt-secret <s>  JWT secret (or TINBASE_JWT_SECRET env var)
-      --memory          in-memory database (no persistence)
+      --memory          in-memory database (no persistence, wasm engine only)
+      --engine <e>      wasm (PGlite, default) or native (embedded Postgres,
+                        ~4x lighter memory; downloads binaries on first run)
 `)
 }
 
@@ -104,7 +117,16 @@ async function main(): Promise<void> {
   if (opts.dataDir) await mkdir(opts.dataDir, { recursive: true })
   await mkdir(opts.storageDir, { recursive: true })
 
+  const engine =
+    opts.engine === 'native'
+      ? await createNativeEngine({
+          dataDir: join(opts.dir, '.tinbase', 'pgdata'),
+          log: (msg) => console.log(`  ${msg}`),
+        })
+      : undefined
+
   const backend = await createBackend({
+    engine,
     dataDir: opts.memory ? undefined : opts.dataDir,
     jwtSecret: opts.jwtSecret,
     siteUrl: `http://${opts.host}:${opts.port}`,
@@ -140,7 +162,7 @@ async function main(): Promise<void> {
   tinbase running
 
            API URL: ${server.url}
-        GraphQL/DB: PGlite (${opts.memory ? 'in-memory' : opts.dataDir})
+            Engine: ${opts.engine === 'native' ? 'native postgres' : `PGlite (${opts.memory ? 'in-memory' : opts.dataDir})`}
            Storage: ${opts.storageDir}
         Migrations: ${project.migrations.length} file(s)
 

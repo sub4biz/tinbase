@@ -9,9 +9,14 @@ export interface MigrationFile {
 export interface BackendConfig {
   /**
    * PGlite data directory. Node: a filesystem path. Browser: "idb://name" or
-   * "opfs-ahp://name". Omit for in-memory.
+   * "opfs-ahp://name". Omit for in-memory. Ignored when `engine` is set.
    */
   dataDir?: string
+  /**
+   * Custom database engine (e.g. the native embedded Postgres engine from
+   * "tinbase/node"). Default: PGlite on `dataDir`.
+   */
+  engine?: import('./db/engine.js').DbEngine
   /** Secret used to sign/verify every JWT. Defaults to the Supabase local-dev secret. */
   jwtSecret?: string
   /** External URL of this backend, used as JWT issuer. */
