@@ -28,7 +28,7 @@ describe('admin', () => {
     const res = await backend.fetch(new Request('http://localhost:54321/_/'))
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('text/html')
-    expect(await res.text()).toContain('tinbase admin')
+    expect(await res.text()).toContain('tinbase studio')
   })
 
   it('rejects the admin API without service_role', async () => {

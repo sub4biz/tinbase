@@ -7,3 +7,5 @@ dist/
 bench/.tmp-*
 bench/pb_migrations/
 dist-bin/
+admin-ui/node_modules/
+admin-ui/dist/
