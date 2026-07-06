@@ -202,10 +202,7 @@ export default function Home() {
           </span>
           <div className="flex items-center gap-6">
             <Link href="/docs" className="hover:text-zinc-300">Docs</Link>
-            <a
-              href="https://github.com/sanketsahu/tinbase/blob/main/bench/footprint.ts"
-              className="hover:text-zinc-300"
-            >
+            <a href="/docs#benchmarks" className="hover:text-zinc-300">
               Benchmarks
             </a>
             <a href="https://x.com/sanketsahu" aria-label="Sanket Sahu on X" className="hover:text-zinc-300">
