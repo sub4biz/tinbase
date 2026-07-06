@@ -3,6 +3,7 @@ import { Code } from '@/components/code'
 import { FootprintChart } from '@/components/footprint-chart'
 
 const SECTIONS = [
+  { id: 'why', label: 'Why tinbase' },
   { id: 'getting-started', label: 'Getting started' },
   { id: 'cli', label: 'CLI reference' },
   { id: 'engines', label: 'Engines' },
@@ -62,6 +63,28 @@ export default function Docs() {
             fast — great for prototypes, local development, demos, and embedded/browser use. It is
             not meant for production usage yet.
           </div>
+
+          <H2 id="why">Why tinbase</H2>
+          <P>
+            tinbase was built for{' '}
+            <a className="text-emerald-400 hover:text-emerald-300" href="https://lifo.sh">
+              lifo
+            </a>{' '}
+            (lifo.sh) — a project that maps Linux APIs into the browser — to let Expo apps run fully
+            in the browser with full-stack capability: database, auth, storage, and realtime with no
+            server behind them. It is part of{' '}
+            <a className="text-emerald-400 hover:text-emerald-300" href="https://rapidnative.com">
+              RapidNative
+            </a>
+            .
+          </P>
+          <P>
+            That origin drives the architecture: every service is a pure{' '}
+            <code className={IC}>(Request) =&gt; Response</code> fetch handler and the default
+            engine is Postgres compiled to WASM, so the entire backend can run in-process inside a
+            browser tab — or as a tiny server on your machine. The same design turned out to make an
+            excellent standalone local Supabase replacement, so it is open source for everyone.
+          </P>
 
           <H2 id="getting-started">Getting started</H2>
           <P>

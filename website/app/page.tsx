@@ -135,6 +135,33 @@ export default function Home() {
           </div>
         </section>
 
+        {/* why it was built */}
+        <section className="border-t border-zinc-800/80 py-20">
+          <div className="mx-auto max-w-3xl text-center">
+            <h2 className="text-3xl font-bold tracking-tight">Why tinbase exists</h2>
+            <p className="mt-5 leading-relaxed text-zinc-400">
+              tinbase was built for{' '}
+              <a href="https://lifo.sh" className="font-medium text-emerald-400 hover:text-emerald-300">
+                lifo
+              </a>{' '}
+              — a project that maps Linux APIs into the browser — to let{' '}
+              <span className="text-zinc-200">Expo apps run fully in the browser with real
+              full-stack capability</span>: a database, auth, storage, and realtime, with no server
+              behind them. That is why every tinbase service is a pure fetch handler and the
+              database is Postgres compiled to WASM — the whole backend can live in-process,
+              inside a browser tab.
+            </p>
+            <p className="mt-4 leading-relaxed text-zinc-400">
+              It is part of{' '}
+              <a href="https://rapidnative.com" className="font-medium text-emerald-400 hover:text-emerald-300">
+                RapidNative
+              </a>
+              . The same architecture turned out to make a great standalone local backend — so it is
+              open source for everyone.
+            </p>
+          </div>
+        </section>
+
         {/* features */}
         <section className="border-t border-zinc-800/80 py-20">
           <h2 className="text-3xl font-bold tracking-tight">Why tinbase</h2>

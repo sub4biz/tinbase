@@ -184,5 +184,7 @@ npm test
 
 ## Why
 
-1. A lighter Supabase for local dev and self-contained apps - `npx tinbase start` instead of Docker Compose.
-2. The whole backend can run **in the browser** (PGlite WASM + fetch-handler architecture), e.g. inside [lifo.sh](https://lifo.sh).
+tinbase was built for [lifo](https://lifo.sh) - a project that maps Linux APIs into the browser - to let **Expo apps run fully in the browser with full-stack capability** (database, auth, storage, realtime, no server). It is part of [RapidNative](https://rapidnative.com). That origin drives the architecture:
+
+1. Every service is a pure fetch handler and the default engine is Postgres compiled to WASM, so the whole backend can run **in-process inside a browser tab**.
+2. The same design makes a lighter Supabase for local dev and self-contained apps - `npx tinbase start` instead of Docker Compose.
