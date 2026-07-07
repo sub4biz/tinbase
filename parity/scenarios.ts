@@ -1,0 +1,149 @@
+/**
+ * Parity scenarios: the same supabase-js programs we run against tinbase and,
+ * when available, a real `supabase start`. Each scenario returns a plain result
+ * object; the harness normalizes volatile values (ids, timestamps, tokens)
+ * before comparing or asserting. `expect` is an optional self-check so the
+ * harness produces a pass/fail scoreboard even without a real Supabase to diff.
+ */
+import type { SupabaseClient } from '@supabase/supabase-js'
+
+export interface Scenario {
+  name: string
+  module: 'rest' | 'auth' | 'storage' | 'rpc' | 'realtime'
+  run: (ctx: ScenarioCtx) => Promise<unknown>
+  /** Self-check on the normalized result; return true if it looks correct. */
+  expect?: (result: any) => boolean
+}
+
+export interface ScenarioCtx {
+  anon: SupabaseClient
+  service: SupabaseClient
+  /** unique-ish suffix so repeated runs don't collide on unique columns */
+  tag: string
+}
+
+const ok = (r: any) => !r?.error
+
+export const SCENARIOS: Scenario[] = [
+  // ── REST ──
+  {
+    name: 'select all posts',
+    module: 'rest',
+    run: async ({ anon }) => anon.from('posts').select('id,title,published').order('id'),
+    expect: (r) => ok(r) && Array.isArray(r.data) && r.data.length >= 2,
+  },
+  {
+    name: 'filter eq + gt',
+    module: 'rest',
+    run: async ({ anon }) => anon.from('posts').select('title').eq('published', true).gt('views', 10),
+    expect: (r) => ok(r) && r.data.length === 1,
+  },
+  {
+    name: 'or filter',
+    module: 'rest',
+    run: async ({ anon }) => anon.from('posts').select('title').or('views.gt.90,title.eq.Second'),
+    expect: (r) => ok(r) && r.data.length === 2,
+  },
+  {
+    name: 'array contains',
+    module: 'rest',
+    run: async ({ anon }) => anon.from('posts').select('title').contains('tags', ['b']),
+    expect: (r) => ok(r) && r.data.length === 2,
+  },
+  {
+    name: 'to-one embed',
+    module: 'rest',
+    run: async ({ anon }) => anon.from('posts').select('title, authors(name)').eq('id', 1).single(),
+    expect: (r) => ok(r) && r.data?.authors?.name === 'Ada',
+  },
+  {
+    name: 'to-many embed',
+    module: 'rest',
+    run: async ({ anon }) => anon.from('authors').select('name, posts(title)').eq('id', 1).single(),
+    expect: (r) => ok(r) && Array.isArray(r.data?.posts),
+  },
+  {
+    name: 'count exact head',
+    module: 'rest',
+    run: async ({ anon }) => {
+      const { count, error } = await anon.from('posts').select('*', { count: 'exact', head: true })
+      return { count, error }
+    },
+    expect: (r) => ok(r) && r.count >= 2,
+  },
+  {
+    name: 'insert + delete roundtrip',
+    module: 'rest',
+    run: async ({ service, tag }) => {
+      const ins = await service.from('authors').insert({ name: `p-${tag}`, email: `p-${tag}@x.com` }).select().single()
+      const del = await service.from('authors').delete().eq('id', (ins.data as any)?.id).select()
+      return { inserted: !!ins.data, deleted: del.data?.length, error: ins.error || del.error }
+    },
+    expect: (r) => ok(r) && r.inserted && r.deleted === 1,
+  },
+  {
+    name: 'unique violation error code',
+    module: 'rest',
+    run: async ({ service }) => service.from('authors').insert({ name: 'dup', email: 'ada@example.com' }),
+    expect: (r) => r.error?.code === '23505',
+  },
+
+  // ── RPC ──
+  {
+    name: 'rpc scalar',
+    module: 'rpc',
+    run: async ({ anon }) => anon.rpc('add_two', { a: 40, b: 2 }),
+    expect: (r) => ok(r) && r.data === 42,
+  },
+
+  // ── Auth ──
+  {
+    name: 'signup returns session',
+    module: 'auth',
+    run: async ({ anon, tag }) => {
+      const r = await anon.auth.signUp({ email: `u-${tag}@example.com`, password: 'password123' })
+      return { hasToken: !!r.data.session?.access_token, email: r.data.user?.email, error: r.error }
+    },
+    expect: (r) => ok(r) && r.hasToken,
+  },
+  {
+    name: 'signin wrong password rejected',
+    module: 'auth',
+    run: async ({ anon, tag }) => {
+      await anon.auth.signUp({ email: `w-${tag}@example.com`, password: 'password123' })
+      await anon.auth.signOut()
+      return anon.auth.signInWithPassword({ email: `w-${tag}@example.com`, password: 'nope' })
+    },
+    expect: (r) => !!r.error,
+  },
+  {
+    name: 'RLS isolates rows between users',
+    module: 'auth',
+    run: async ({ anon, service, tag }) => {
+      await anon.auth.signUp({ email: `a-${tag}@example.com`, password: 'password123' })
+      await anon.from('notes').insert({ content: 'secret' })
+      await anon.auth.signOut()
+      await anon.auth.signUp({ email: `b-${tag}@example.com`, password: 'password123' })
+      const asB = await anon.from('notes').select()
+      await anon.auth.signOut()
+      const asService = await service.from('notes').select()
+      return { bSees: asB.data?.length, serviceSees: (asService.data?.length ?? 0) >= 1, error: asB.error }
+    },
+    expect: (r) => ok(r) && r.bSees === 0 && r.serviceSees,
+  },
+
+  // ── Storage ──
+  {
+    name: 'bucket + upload + download',
+    module: 'storage',
+    run: async ({ service, tag }) => {
+      const bucket = `b${tag}`
+      await service.storage.createBucket(bucket, { public: true })
+      const up = await service.storage.from(bucket).upload('hello.txt', new Blob(['hi'], { type: 'text/plain' }))
+      const down = await service.storage.from(bucket).download('hello.txt')
+      const text = down.data ? await down.data.text() : null
+      return { uploaded: !!up.data, text, error: up.error || down.error }
+    },
+    expect: (r) => ok(r) && r.uploaded && r.text === 'hi',
+  },
+]

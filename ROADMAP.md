@@ -59,9 +59,10 @@ Each phase ships independently, keeps 100% test green on both engines, and moves
 the "runs my real app" bar forward. Check items off as they land.
 
 ### Phase 0 — Parity harness (infrastructure)
-- [ ] Optional dev dependency on the Supabase CLI; script to boot both stacks
-- [ ] Shared scenario programs (supabase-js) run against both; result differ
-- [ ] Conformance report committed; wire into CI as an informational job
+- [x] Shared scenario programs (supabase-js) — `parity/scenarios.ts`
+- [x] Self-scored harness runs against tinbase on both engines — `npm run parity` (14/14)
+- [x] `--compare` diffs normalized results against a real `supabase start` (needs Docker)
+- [ ] Wire `--compare` into CI as an informational job (once a CI Docker path is set up)
 
 ### Phase 1 — Auth completeness (the #1 real-app blocker)
 - [ ] OAuth providers (Google, GitHub first) — `signInWithOAuth()` end to end
