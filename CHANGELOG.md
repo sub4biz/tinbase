@@ -4,6 +4,15 @@ All notable changes to tinbase are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow semver
 (pre-1.0, minor bumps may include breaking changes).
 
+## [0.6.1] — 2026-07-08
+
+### Fixed
+- **`tinbase start` no longer crashes when the port is in use.** It now probes
+  for a free port from the requested one and starts on the next available port
+  with a notice (instead of an `EADDRINUSE` stack trace); if the range is
+  exhausted it exits with a clear message. The printed URL, keys, and `siteUrl`
+  reflect the actual bound port.
+
 ## [0.6.0] — 2026-07-08
 
 The biggest release since the first public cut: a third database engine, MFA,
@@ -67,6 +76,7 @@ Earlier tagged previews: the core Supabase-compatible surface — REST (PostgRES
 grammar), Auth (GoTrue), Storage, Realtime, RLS, migrations, and the single-file
 binary — on the PGlite (wasm) and native Postgres engines.
 
+[0.6.1]: https://github.com/sanketsahu/tinbase/releases/tag/v0.6.1
 [0.6.0]: https://github.com/sanketsahu/tinbase/releases/tag/v0.6.0
 [0.2.0]: https://github.com/sanketsahu/tinbase/releases/tag/v0.2.0
 [0.1.0]: https://github.com/sanketsahu/tinbase/releases/tag/v0.1.0
