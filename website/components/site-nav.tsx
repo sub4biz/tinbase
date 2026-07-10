@@ -8,9 +8,9 @@ const VERSION = `v${process.env.NEXT_PUBLIC_TINBASE_VERSION ?? '0.0.0'}`
 export function SiteNav() {
   return (
     <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur">
-      <nav className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
-        <div className="flex items-center gap-2.5">
-          <Link href="/" className="flex items-center gap-2.5 font-semibold">
+      <nav className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-4 sm:px-6">
+        <div className="flex min-w-0 shrink items-center gap-2.5">
+          <Link href="/" className="flex shrink-0 items-center gap-2.5 font-semibold">
             <Image src="/logo.svg" alt="" width={26} height={26} />
             tinbase
           </Link>
@@ -29,14 +29,14 @@ export function SiteNav() {
             </span>
           </span>
         </div>
-        <div className="flex items-center gap-1 text-sm">
-          <Link href="/docs" className="rounded-md px-3 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white">
+        <div className="flex shrink-0 items-center gap-0.5 text-sm sm:gap-1">
+          <Link href="/docs" className="rounded-md px-2 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white sm:px-3">
             Docs
           </Link>
-          <Link href="/studio" className="rounded-md px-3 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white">
+          <Link href="/studio" className="rounded-md px-2 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white sm:px-3">
             Studio
           </Link>
-          <Link href="/browser" className="rounded-md px-3 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white">
+          <Link href="/browser" className="rounded-md px-2 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white sm:px-3">
             Browser
           </Link>
           <a href="/#benchmarks" className="hidden rounded-md px-3 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white sm:block">
@@ -44,9 +44,10 @@ export function SiteNav() {
           </a>
           <a
             href="https://github.com/tinbase/tinbase"
-            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white"
+            aria-label="GitHub"
+            className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-zinc-300 hover:bg-zinc-800/60 hover:text-white sm:px-3"
           >
-            <GitHubIcon /> GitHub
+            <GitHubIcon /> <span className="hidden sm:inline">GitHub</span>
           </a>
         </div>
       </nav>

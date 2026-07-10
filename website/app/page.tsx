@@ -87,7 +87,9 @@ export default function Home() {
         {/* hero */}
         <section className="flex flex-col items-center py-24 text-center">
           <Image src="/logo.svg" alt="tinbase logo" width={88} height={88} priority />
-          <Badge className="mt-8">Supabase-compatible backend, without Docker · Open source (MIT)</Badge>
+          <Badge className="mt-8 max-w-full text-center leading-snug">
+            {'Supabase-compatible backend, without Docker · Open source (MIT)'}
+          </Badge>
           <h1 className="mt-6 max-w-3xl text-balance text-5xl font-bold tracking-tight sm:text-6xl">
             The Supabase-compatible backend that fits in a <span className="text-emerald-400">tin</span>
           </h1>
