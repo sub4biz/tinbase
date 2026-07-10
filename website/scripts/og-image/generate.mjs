@@ -69,10 +69,18 @@ const html = `<!doctype html>
 <body>
   <div class="card">
     <svg class="logo" width="128" height="128" viewBox="0 0 120 120" fill="none">
-      <path d="M24 34v56c0 8.8 16.1 16 36 16s36-7.2 36-16V34" fill="#059669" />
-      <path d="M24 62c0 8.8 16.1 16 36 16s36-7.2 36-16" stroke="#ffffff" stroke-opacity="0.35" stroke-width="4" fill="none" />
-      <ellipse cx="60" cy="34" rx="36" ry="16" fill="#34d399" />
-      <circle cx="72" cy="31" r="7" fill="none" stroke="#065f46" stroke-width="4" />
+      <defs>
+        <linearGradient id="tinBody" x1="30" y1="30" x2="92" y2="102" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#10b981" /><stop offset="1" stop-color="#047857" />
+        </linearGradient>
+        <linearGradient id="tinLid" x1="26" y1="19" x2="94" y2="49" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#6ee7b7" /><stop offset="1" stop-color="#34d399" />
+        </linearGradient>
+      </defs>
+      <path d="M26 34v52c0 8.4 15.2 15.2 34 15.2s34-6.8 34-15.2V34Z" fill="url(#tinBody)" />
+      <path d="M26 60c0 8.4 15.2 15.2 34 15.2S94 68.4 94 60" stroke="#6ee7b7" stroke-width="3" fill="none" />
+      <ellipse cx="60" cy="34" rx="34" ry="15" fill="url(#tinLid)" />
+      <ellipse cx="60" cy="34" rx="25" ry="10" fill="none" stroke="#059669" stroke-opacity="0.5" stroke-width="2.5" />
     </svg>
     <h1>The Supabase-compatible backend that fits in a <span class="tin">tin</span></h1>
     <p>One small binary · real Postgres with RLS · supabase-js works unchanged · no Docker</p>

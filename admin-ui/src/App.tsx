@@ -24,9 +24,21 @@ const NAV: { id: Tab; label: string; icon: typeof Table2 }[] = [
 
 function Logo({ size = 24 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 120 120">
-      <path d="M24 34v56c0 8.8 16.1 16 36 16s36-7.2 36-16V34" fill="#2a9d6f" />
-      <ellipse cx="60" cy="34" rx="36" ry="16" fill="#3ecf8e" />
+    <svg width={size} height={size} viewBox="0 0 120 120" fill="none">
+      <defs>
+        <linearGradient id="tbLogoBody" x1="30" y1="30" x2="92" y2="102" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#10b981" />
+          <stop offset="1" stopColor="#047857" />
+        </linearGradient>
+        <linearGradient id="tbLogoLid" x1="26" y1="19" x2="94" y2="49" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#6ee7b7" />
+          <stop offset="1" stopColor="#34d399" />
+        </linearGradient>
+      </defs>
+      <path d="M26 34v52c0 8.4 15.2 15.2 34 15.2s34-6.8 34-15.2V34Z" fill="url(#tbLogoBody)" />
+      <path d="M26 60c0 8.4 15.2 15.2 34 15.2S94 68.4 94 60" stroke="#6ee7b7" strokeWidth="3" fill="none" />
+      <ellipse cx="60" cy="34" rx="34" ry="15" fill="url(#tbLogoLid)" />
+      <ellipse cx="60" cy="34" rx="25" ry="10" fill="none" stroke="#059669" strokeOpacity="0.5" strokeWidth="2.5" />
     </svg>
   )
 }
