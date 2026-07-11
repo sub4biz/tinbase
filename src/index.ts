@@ -317,7 +317,7 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
     close: async () => {
       cron.stop()
       net.stop()
-      retention.stop()
+      await retention.stop()
       webhooks.stopService()
       realtime.stop()
       await db.close()
