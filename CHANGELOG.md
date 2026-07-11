@@ -4,6 +4,71 @@ All notable changes to tinbase are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow semver
 (pre-1.0, minor bumps may include breaking changes).
 
+## [Unreleased]
+
+A security hardening pass and a set of GDPR / compliance building blocks. Based
+on the audit and PRs by [@BankkRoll](https://github.com/BankkRoll) (#40, #41,
+#42), reworked onto `main`.
+
+### Security
+- **Storage signed URLs are now purpose-scoped.** Download and upload tokens
+  carry a `type` claim checked on redeem, so a download token can no longer be
+  replayed against the upload endpoint. Signed-upload redeems now run as the
+  token owner (RLS applies) instead of the RLS-bypassing service role.
+- **`cron.schedule` / `net.http_*` restricted to `service_role`.** These run as
+  the superuser owner; they are no longer granted to `authenticated`.
+- **SSRF guard for `net.http_*`** — blocks loopback, private, link-local, and
+  cloud-metadata targets and non-http(s) schemes, with a 10 MiB response cap.
+- **OTP hardening** — per-email attempt limit with lockout; a login OTP can no
+  longer redeem a recovery token (recovery requires `type=recovery`).
+- **OAuth linking requires a provider-verified email**, closing an
+  account-takeover-by-unverified-email vector.
+- **JWT verification pinned to HS256** (rejects `alg:none` / alg-swap).
+- **TOTP challenges are single-use** (no replay within the validity window).
+- **Stored-XSS guard on served objects** — `X-Content-Type-Options: nosniff`
+  always, and `Content-Disposition: attachment` for active types (html/svg/xml).
+- **Realtime DELETE no longer leaks `old_record` across tenants** — non-service
+  subscribers on RLS tables receive only the primary key on DELETE.
+- **WebSocket rejects unmasked client frames** (RFC 6455 §5.1; closes with 1002).
+- **Edge functions no longer leak host env** (`Deno.env` scoped to injected
+  `SUPABASE_*`/declared secrets) and `Deno.exit` no longer kills the server.
+- **Cron `0 seconds` interval floored to 1s**; an unparseable storage
+  `file_size_limit` is now rejected (400) instead of silently disabling the cap.
+
+### Added
+- **GDPR data export** — `GET /auth/v1/admin/users/:id/export` (service_role)
+  returns a user's profile, identities, sessions, and MFA factors as one JSON
+  document, with credential/token columns stripped.
+- **GDPR erasure** — admin user delete verifies existence (404 vs silent 200)
+  and reports the auth rows removed by cascade.
+- **Audit log** — append-only `auth.audit_log_entries` (GoTrue-compatible) for
+  signup, login, failed login, logout, erasure, and data export; readable at
+  `GET /auth/v1/admin/audit` (service_role). Writes are best-effort.
+- **Vault encryption at rest** — the Vault stand-in now encrypts secrets with
+  pgcrypto under a key held only in a session GUC (`vaultKey`, derived from
+  `jwtSecret` by default). `decrypted_secrets` decrypts on read.
+- **Data retention** — an in-process hourly sweep purges expired one-time
+  tokens, MFA challenges, OAuth flow state, aged-out revoked refresh tokens, and
+  audit entries past a window. Configurable via `retention`; `0` disables a sweep.
+- **`COMPLIANCE.md`** mapping what tinbase provides vs. what the operator is
+  responsible for.
+
+### Changed
+- The default mailer log records only recipient and subject, not the body (which
+  carries OTP codes and magic links). Set `logMailBody: true` for full local
+  logging; the `/inbox` dev UI still shows the full body.
+
+### Migration notes
+- **New databases** pick up the schema additions automatically. An **existing
+  persisted database** created before this change needs, before OTP verify and
+  the audit log / retention sweep work:
+  - `alter table auth.one_time_tokens add column attempts int not null default 0;`
+  - the `auth.audit_log_entries` table (created by the current bootstrap).
+- **Behavior changes clients may observe:** signed *upload* URLs now enforce RLS;
+  `verify` without a `type` no longer redeems recovery tokens; admin user delete
+  returns 404 for a missing user; RLS-table realtime DELETE payloads contain only
+  the primary key for non-service subscribers.
+
 ## [0.8.1] — 2026-07-10
 
 Slims the `pgmem` engine and corrects its documented footprint.
