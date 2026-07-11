@@ -98,7 +98,7 @@ export class AuthHandler {
       if (path === 'callback' && (method === 'GET' || method === 'POST')) {
         return await this.oauth.callback(url, (userId) => this.sessionTokensFor(userId))
       }
-      if (path.startsWith('admin/users')) return await this.admin(req, ctx, path, method)
+      if (path.startsWith('admin/')) return await this.admin(req, ctx, path, method)
       return authError(404, 'not_found', `unknown auth endpoint: ${path}`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -147,7 +147,9 @@ export class AuthHandler {
        returning *`,
       [email, hashed, JSON.stringify(body.data ?? {})]
     )
-    return json(200, await this.sessionFor(res.rows[0] as UserRow))
+    const newUser = res.rows[0] as UserRow
+    await this.audit('user_signedup', { actorId: newUser.id, actorEmail: email })
+    return json(200, await this.sessionFor(newUser))
   }
 
   private async token(req: Request, url: URL): Promise<Response> {
@@ -159,9 +161,11 @@ export class AuthHandler {
       const res = await this.db.query(`select * from auth.users where email = $1`, [email])
       const user = res.rows[0] as UserRow | undefined
       if (!user || !user.encrypted_password || !(await verifyPassword(body.password ?? '', user.encrypted_password))) {
+        await this.audit('login_failed', { actorEmail: email, traits: { grant_type: 'password' } })
         return authError(400, 'invalid_credentials', 'Invalid login credentials')
       }
       await this.db.query(`update auth.users set last_sign_in_at = now() where id = $1`, [user.id])
+      await this.audit('login', { actorId: user.id, actorEmail: user.email, traits: { grant_type: 'password' } })
       return json(200, await this.sessionFor(user))
     }
 
@@ -263,6 +267,7 @@ export class AuthHandler {
     const user = await this.userFromBearer(req)
     if (user) {
       await this.db.query(`update auth.refresh_tokens set revoked = true where user_id = $1`, [user.id])
+      await this.audit('logout', { actorId: user.id, actorEmail: user.email })
     }
     return new Response(null, { status: 204 })
   }
@@ -316,16 +321,37 @@ export class AuthHandler {
     return this.issueToken(body.email, 'recovery', false)
   }
 
+  /** Max wrong guesses for a one-time code before its tokens are invalidated. */
+  private static readonly MAX_OTP_ATTEMPTS = 5
+
   private async redeem(token: string, types: string[], email?: string): Promise<UserRow | null> {
+    const normalizedEmail = email?.toLowerCase().trim() ?? null
     const res = await this.db.query(
       `delete from auth.one_time_tokens
        where token = $1 and token_type = any($2::text[])
          and ($3::text is null or email = $3) and expires_at > now()
+         and attempts < $4
        returning user_id, email`,
-      [token, `{${types.join(',')}}`, email?.toLowerCase().trim() ?? null]
+      [token, `{${types.join(',')}}`, normalizedEmail, AuthHandler.MAX_OTP_ATTEMPTS]
     )
     const row = res.rows[0] as { user_id: string; email: string } | undefined
-    if (!row) return null
+    if (!row) {
+      // Wrong/expired code: count the failed guess against the live tokens for
+      // this email, and burn them once the attempt cap is hit (brute-force
+      // lockout for the 6-digit OTP). Requires the email to scope the counter.
+      if (normalizedEmail) {
+        await this.db.query(
+          `update auth.one_time_tokens set attempts = attempts + 1
+           where email = $1 and token_type = any($2::text[]) and expires_at > now()`,
+          [normalizedEmail, `{${types.join(',')}}`]
+        )
+        await this.db.query(
+          `delete from auth.one_time_tokens where email = $1 and attempts >= $2`,
+          [normalizedEmail, AuthHandler.MAX_OTP_ATTEMPTS]
+        )
+      }
+      return null
+    }
     await this.db.query(`delete from auth.one_time_tokens where email = $1`, [row.email])
     const ures = await this.db.query(
       `update auth.users set email_confirmed_at = coalesce(email_confirmed_at, now()), last_sign_in_at = now()
@@ -338,8 +364,11 @@ export class AuthHandler {
   private async verifyToken(req: Request): Promise<Response> {
     const body = (await req.json().catch(() => ({}))) as { type?: string; email?: string; token?: string }
     if (!body.token) return authError(400, 'validation_failed', 'token is required')
+    // A recovery (password-reset) token must be redeemed with type=recovery
+    // explicitly — never fold it into the default set, or a guessed login OTP
+    // could mint a recovery session.
     const types =
-      body.type === 'recovery' ? ['recovery'] : body.type === 'magiclink' ? ['magiclink'] : ['otp', 'magiclink', 'recovery']
+      body.type === 'recovery' ? ['recovery'] : body.type === 'magiclink' ? ['magiclink'] : ['otp', 'magiclink']
     const user = await this.redeem(body.token, types, body.email)
     if (!user) return authError(403, 'otp_expired', 'Token has expired or is invalid')
     return json(200, await this.sessionFor(user))
@@ -365,6 +394,19 @@ export class AuthHandler {
       return authError(403, 'insufficient_permissions', 'Admin endpoints require the service_role key')
     }
     const idMatch = path.match(/^admin\/users\/([0-9a-f-]{36})$/)
+    const exportMatch = path.match(/^admin\/users\/([0-9a-f-]{36})\/export$/)
+
+    if (path === 'admin/audit' && method === 'GET') {
+      const res = await this.db.query(
+        `select id, payload, created_at, ip_address from auth.audit_log_entries
+         order by created_at desc limit 200`
+      )
+      return json(200, { entries: res.rows })
+    }
+
+    if (exportMatch && method === 'GET') {
+      return await this.exportUser(exportMatch[1])
+    }
 
     if (path === 'admin/users' && method === 'GET') {
       const res = await this.db.query(`select * from auth.users order by created_at desc limit 1000`)
@@ -431,10 +473,114 @@ export class AuthHandler {
       return json(200, this.userJson(res.rows[0] as UserRow))
     }
     if (idMatch && method === 'DELETE') {
-      await this.db.query(`delete from auth.users where id = $1`, [idMatch[1]])
-      return json(200, {})
+      return await this.eraseUser(idMatch[1])
     }
     return authError(404, 'not_found', `unknown admin endpoint`)
+  }
+
+  // ── audit trail ───────────────────────────────────────────────────────
+
+  /**
+   * Append a security event to auth.audit_log_entries (GoTrue-compatible
+   * payload). Best-effort: a logging failure never breaks the request.
+   */
+  private async audit(
+    action: string,
+    opts: { actorId?: string | null; actorEmail?: string | null; type?: string; traits?: Record<string, unknown> } = {}
+  ): Promise<void> {
+    try {
+      const payload = {
+        action,
+        actor_id: opts.actorId ?? null,
+        actor_username: opts.actorEmail ?? null,
+        log_type: opts.type ?? 'account',
+        traits: opts.traits ?? {},
+        timestamp: new Date().toISOString(),
+      }
+      await this.db.query(`insert into auth.audit_log_entries (payload) values ($1::jsonb)`, [JSON.stringify(payload)])
+    } catch {
+      // audit logging is best-effort
+    }
+  }
+
+  // ── GDPR: data-subject access (export) ────────────────────────────────
+
+  /**
+   * Export everything held about one user across the auth schema, for a GDPR
+   * right-of-access / portability request. Credentials (password hash, MFA
+   * secrets, raw token values) are deliberately omitted — they are not personal
+   * data to hand back and exporting them would leak secrets.
+   */
+  private async exportUser(userId: string): Promise<Response> {
+    const ures = await this.db.query(`select * from auth.users where id = $1`, [userId])
+    if (ures.rows.length === 0) return authError(404, 'user_not_found', 'User not found')
+    const user = ures.rows[0] as UserRow & Record<string, unknown>
+
+    const identities = await this.db.query(
+      `select id, provider, provider_id, identity_data, last_sign_in_at, created_at, updated_at
+       from auth.identities where user_id = $1`,
+      [userId]
+    )
+    const sessions = await this.db.query(
+      `select id, parent, session_id, revoked, created_at, updated_at
+       from auth.refresh_tokens where user_id = $1`,
+      [userId]
+    )
+    const factors = await this.db.query(
+      `select id, friendly_name, factor_type, status, created_at, updated_at
+       from auth.mfa_factors where user_id = $1`,
+      [userId]
+    )
+
+    // strip credential/token columns from the raw record before returning it
+    const SENSITIVE = [
+      'encrypted_password',
+      'confirmation_token',
+      'recovery_token',
+      'email_change_token_new',
+      'email_change_token_current',
+      'phone_change_token',
+      'reauthentication_token',
+    ]
+    const userSafe = Object.fromEntries(Object.entries(user).filter(([k]) => !SENSITIVE.includes(k)))
+    await this.audit('user_data_exported', { actorId: userId, type: 'admin' })
+    return json(200, {
+      exported_at: new Date().toISOString(),
+      user: this.userJson(user),
+      user_record: userSafe,
+      identities: identities.rows,
+      sessions: sessions.rows,
+      mfa_factors: factors.rows,
+    })
+  }
+
+  /**
+   * Erase a user (GDPR right to erasure). Deletes the user row; auth.identities,
+   * refresh_tokens, one_time_tokens, flow_state, and mfa_factors/challenges are
+   * removed by their ON DELETE CASCADE foreign keys. Returns a 404 if the user
+   * doesn't exist and a summary of what was erased.
+   *
+   * Note: storage.objects.owner has no FK to auth.users, so object rows/bytes
+   * owned by the user are not removed here — see COMPLIANCE.md for the
+   * storage-erasure step the operator must run.
+   */
+  private async eraseUser(userId: string): Promise<Response> {
+    const before = await this.db.query<{ identities: number; sessions: number; factors: number }>(
+      `select
+         (select count(*) from auth.identities where user_id = $1)::int as identities,
+         (select count(*) from auth.refresh_tokens where user_id = $1)::int as sessions,
+         (select count(*) from auth.mfa_factors where user_id = $1)::int as factors`,
+      [userId]
+    )
+    const del = await this.db.query(`delete from auth.users where id = $1 returning id`, [userId])
+    if (del.rows.length === 0) return authError(404, 'user_not_found', 'User not found')
+    const c = before.rows[0]
+    await this.audit('user_deleted', { actorId: userId, type: 'admin', traits: { erased: true } })
+    return json(200, {
+      erased: true,
+      user_id: userId,
+      cascaded: { identities: c.identities, sessions: c.sessions, mfa_factors: c.factors },
+    })
   }
 
   // ── MFA (TOTP) ────────────────────────────────────────────────────────
@@ -515,13 +661,17 @@ export class AuthHandler {
     const factor = fr.rows[0] as { id: string; secret: string; status: string } | undefined
     if (!factor) return authError(404, 'mfa_factor_not_found', 'MFA factor not found')
     const cr = await this.db.query(
-      `select id, expires_at from auth.mfa_challenges where id = $1 and factor_id = $2`,
+      `select id, expires_at, verified_at from auth.mfa_challenges where id = $1 and factor_id = $2`,
       [body.challenge_id ?? '', factorId]
     )
-    const challenge = cr.rows[0] as { id: string; expires_at: string | Date } | undefined
+    const challenge = cr.rows[0] as { id: string; expires_at: string | Date; verified_at: string | Date | null } | undefined
     if (!challenge) return authError(404, 'mfa_challenge_not_found', 'MFA challenge not found')
     if (new Date(challenge.expires_at).getTime() < Date.now()) {
       return authError(422, 'mfa_challenge_expired', 'MFA challenge has expired, verify against another one')
+    }
+    // a challenge is single-use: once verified it cannot be replayed
+    if (challenge.verified_at) {
+      return authError(422, 'mfa_verification_failed', 'This challenge has already been verified')
     }
     if (!(await verifyTotp(factor.secret, body.code ?? ''))) {
       return authError(422, 'mfa_verification_failed', 'Invalid TOTP code entered')

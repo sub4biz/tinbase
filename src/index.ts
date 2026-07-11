@@ -23,6 +23,7 @@ import { StorageHandler } from './storage/handler.js'
 import { WebhooksService, type WebhookDelivery } from './webhooks/service.js'
 import { CronService } from './cron/service.js'
 import { NetService, type NetDelivery } from './net/service.js'
+import { RetentionService } from './retention/service.js'
 import { DEFAULT_JWT_SECRET, type BackendConfig, type Mailer, type MigrationFile, type RequestContext } from './types.js'
 
 export * from './types.js'
@@ -40,6 +41,7 @@ export { installDenoShim, setDenoEnv } from './functions/deno-shim.js'
 export { WebhooksService, type WebhookConfig, type WebhookDelivery } from './webhooks/service.js'
 export { CronService, cronMatches } from './cron/service.js'
 export { NetService, type NetDelivery } from './net/service.js'
+export { RetentionService, type RetentionConfig } from './retention/service.js'
 export { snapshotSchema, diffSchemas, type SchemaSnapshot } from './db/schema-diff.js'
 export { inspectDb, type TableInfo } from './db/inspect.js'
 
@@ -52,6 +54,7 @@ export interface TinbaseBackend {
   webhooks: WebhooksService
   cron: CronService
   net: NetService
+  retention: RetentionService
   /** JWT for the anon role — use as supabase-js's supabaseKey. */
   anonKey: string
   /** JWT for the service_role — bypasses RLS. */
@@ -89,7 +92,11 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
     baseLog(m)
   }
 
-  const db = await Database.create(config.engine ?? config.dataDir)
+  // Vault encryption key: use the configured value, else derive one from the
+  // JWT secret so vault secrets are encrypted at rest out of the box (better
+  // than the old plaintext store). Set a dedicated vaultKey in production.
+  const vaultKey = config.vaultKey ?? `tinbase-vault:${jwtSecret}`
+  const db = await Database.create(config.engine ?? config.dataDir, { vaultKey })
   if (config.migrations?.length || config.seedSql) {
     const applied = await db.runMigrations(config.migrations ?? [], config.seedSql)
     if (applied.length > 0) log(`applied migrations: ${applied.join(', ')}`)
@@ -105,11 +112,21 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
 
   const rest = new RestHandler(db)
   // With no custom mailer, capture auth emails in an in-memory inbox (viewable
-  // at /inbox) and still log them. A provided mailer takes over and no inbox is
-  // mounted.
+  // at /inbox) and log a metadata-only line. A provided mailer takes over and no
+  // inbox is mounted.
+  //
+  // The server log records only the recipient and subject — never the body,
+  // which carries OTP codes and magic links. Set logMailBody: true to also log
+  // the full body for local debugging (the /inbox UI always shows it in full).
   const inbox = config.mailer
     ? null
-    : new InboxMailer((msg) => log(`[mail] to=${msg.to} subject="${msg.subject}"\n${msg.text}`))
+    : new InboxMailer((msg) =>
+        log(
+          config.logMailBody
+            ? `[mail] to=${msg.to} subject="${msg.subject}"\n${msg.text}`
+            : `[mail] to=${msg.to} subject="${msg.subject}"`
+        )
+      )
   const mailer: Mailer = config.mailer ?? inbox!
   const auth = new AuthHandler(db, {
     jwtSecret,
@@ -130,6 +147,9 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
 
   const cron = new CronService(db)
   cron.start()
+
+  const retention = new RetentionService(db, config.retention)
+  retention.start()
 
   const net = new NetService(db, config.netFetch, undefined, (d: NetDelivery) =>
     log(`[net] ${d.method} ${d.url} -> ${d.timedOut ? 'TIMEOUT' : d.error ? 'FAILED ' + d.error : d.status}`)
@@ -287,6 +307,7 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
     webhooks,
     cron,
     net,
+    retention,
     anonKey,
     serviceRoleKey,
     jwtSecret,
@@ -296,6 +317,7 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
     close: async () => {
       cron.stop()
       net.stop()
+      await retention.stop()
       webhooks.stopService()
       realtime.stop()
       await db.close()

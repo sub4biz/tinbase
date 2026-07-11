@@ -48,7 +48,17 @@ function iso(v: Date | string | null): string | null {
   return v instanceof Date ? v.toISOString() : new Date(v).toISOString()
 }
 
-const SERVICE_CTX: RequestContext = { role: 'service_role', claims: { role: 'service_role' } }
+/** Content types a browser will render and that can execute script in-origin. */
+function isRenderableActiveType(contentType: string): boolean {
+  const t = contentType.split(';')[0].trim().toLowerCase()
+  return (
+    t === 'text/html' ||
+    t === 'application/xhtml+xml' ||
+    t === 'image/svg+xml' ||
+    t === 'application/xml' ||
+    t === 'text/xml'
+  )
+}
 
 export class StorageHandler {
   constructor(
@@ -118,6 +128,9 @@ export class StorageHandler {
       }
       return storageError(404, 'not_found', `unknown storage endpoint: ${rest}`)
     } catch (e) {
+      if (e instanceof StorageValidationError) {
+        return storageError(400, 'InvalidRequest', e.message)
+      }
       const pg = e as { code?: string; message?: string }
       if (pg.code === '42501') {
         return storageError(403, 'Unauthorized', pg.message ?? 'new row violates row-level security policy')
@@ -313,16 +326,20 @@ export class StorageHandler {
     const bytes = await this.driver.get(`${bucketId}/${key}`)
     if (bytes === null) return storageError(404, 'not_found', 'Object not found')
     const meta = row.metadata ?? {}
-    return new Response(head ? null : (bytes as BodyInit), {
-      status: 200,
-      headers: {
-        'content-type': String(meta.mimetype ?? 'application/octet-stream'),
-        'content-length': String(bytes.length),
-        'cache-control': String(meta.cacheControl ?? 'no-cache'),
-        etag: String(meta.eTag ?? '""'),
-        'last-modified': new Date(String(meta.lastModified ?? Date.now())).toUTCString(),
-      },
-    })
+    const contentType = String(meta.mimetype ?? 'application/octet-stream')
+    const headers: Record<string, string> = {
+      'content-type': contentType,
+      'content-length': String(bytes.length),
+      'cache-control': String(meta.cacheControl ?? 'no-cache'),
+      etag: String(meta.eTag ?? '""'),
+      'last-modified': new Date(String(meta.lastModified ?? Date.now())).toUTCString(),
+      // never let the browser sniff a different (executable) type
+      'x-content-type-options': 'nosniff',
+    }
+    // The content-type is attacker-controlled at upload time; force active
+    // content to download instead of rendering same-origin (stored-XSS guard).
+    if (isRenderableActiveType(contentType)) headers['content-disposition'] = 'attachment'
+    return new Response(head ? null : (bytes as BodyInit), { status: 200, headers })
   }
 
   private async removeObjects(req: Request, ctx: RequestContext, bucketId: string): Promise<Response> {
@@ -477,7 +494,7 @@ export class StorageHandler {
       q(`select id from storage.objects where bucket_id = $1 and name = $2`, [bucketId, key])
     )
     if (res.rows.length === 0) return storageError(404, 'not_found', 'Object not found')
-    const token = await this.makeSignToken(bucketId, key, body.expiresIn ?? 3600)
+    const token = await this.makeSignToken('download', bucketId, key, body.expiresIn ?? 3600)
     return json(200, { signedURL: `/object/sign/${bucketId}/${encPath(key)}?token=${token}` })
   }
 
@@ -491,7 +508,7 @@ export class StorageHandler {
       if (res.rows.length === 0) {
         out.push({ path, error: 'Object not found', signedURL: null })
       } else {
-        const token = await this.makeSignToken(bucketId, path, body.expiresIn ?? 3600)
+        const token = await this.makeSignToken('download', bucketId, path, body.expiresIn ?? 3600)
         out.push({ path, error: null, signedURL: `/object/sign/${bucketId}/${encPath(path)}?token=${token}` })
       }
     }
@@ -501,7 +518,7 @@ export class StorageHandler {
   private async redeemSignedUrl(url: URL, bucketId: string, key: string): Promise<Response> {
     const token = url.searchParams.get('token') ?? ''
     const claims = await verifyJwt(token, this.config.jwtSecret)
-    if (!claims || claims.url !== `${bucketId}/${key}`) {
+    if (!claims || claims.url !== `${bucketId}/${key}` || claims.type !== 'download') {
       return storageError(400, 'InvalidJWT', 'The provided token is invalid or expired')
     }
     const res = await this.db.query(`select * from storage.objects where bucket_id = $1 and name = $2`, [
@@ -516,7 +533,8 @@ export class StorageHandler {
   private async signUploadUrl(ctx: RequestContext, bucketId: string, key: string): Promise<Response> {
     const bucket = await this.loadBucket(bucketId)
     if (!bucket) return storageError(404, 'Bucket not found', 'Bucket not found')
-    const token = await this.makeSignToken(bucketId, key, 7200, ctx.claims?.sub)
+    const owner = typeof ctx.claims?.sub === 'string' ? ctx.claims.sub : undefined
+    const token = await this.makeSignToken('upload', bucketId, key, 7200, owner)
     return json(200, {
       url: `/object/upload/sign/${bucketId}/${encPath(key)}?token=${token}`,
       token,
@@ -526,15 +544,27 @@ export class StorageHandler {
   private async redeemSignedUpload(req: Request, url: URL, bucketId: string, key: string): Promise<Response> {
     const token = url.searchParams.get('token') ?? ''
     const claims = await verifyJwt(token, this.config.jwtSecret)
-    if (!claims || claims.url !== `${bucketId}/${key}`) {
+    if (!claims || claims.url !== `${bucketId}/${key}` || claims.type !== 'upload') {
       return storageError(400, 'InvalidJWT', 'The provided token is invalid or expired')
     }
-    return this.upload(req, SERVICE_CTX, bucketId, key)
+    // redeem as the token's owner (authenticated user) so RLS still governs the
+    // write, rather than the RLS-bypassing service role.
+    const owner = typeof claims.owner === 'string' ? claims.owner : undefined
+    const uploadCtx: RequestContext = owner
+      ? { role: 'authenticated', claims: { role: 'authenticated', sub: owner } }
+      : { role: 'anon', claims: { role: 'anon' } }
+    return this.upload(req, uploadCtx, bucketId, key)
   }
 
-  private makeSignToken(bucketId: string, key: string, expiresIn: number, owner?: string): Promise<string> {
+  private makeSignToken(
+    type: 'download' | 'upload',
+    bucketId: string,
+    key: string,
+    expiresIn: number,
+    owner?: string
+  ): Promise<string> {
     const now = Math.floor(Date.now() / 1000)
-    return signJwt({ url: `${bucketId}/${key}`, iat: now, exp: now + expiresIn, owner }, this.config.jwtSecret)
+    return signJwt({ type, url: `${bucketId}/${key}`, iat: now, exp: now + expiresIn, owner }, this.config.jwtSecret)
   }
 }
 
@@ -564,11 +594,15 @@ function objectJson(r: ObjectRow): Record<string, unknown> {
   }
 }
 
+class StorageValidationError extends Error {}
+
 function parseSizeLimit(v: number | string | null | undefined): number | null {
-  if (v === null || v === undefined) return null
+  if (v === null || v === undefined || v === '') return null
   if (typeof v === 'number') return v
   const m = v.match(/^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb)?$/i)
-  if (!m) return null
+  // a provided-but-unparseable limit must be rejected, not silently treated as
+  // unlimited (which would disable the cap on a typo like "10 megabytes")
+  if (!m) throw new StorageValidationError(`invalid file_size_limit: ${v}`)
   const mult = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3 }[(m[2] ?? 'b').toLowerCase()]!
   return Math.floor(parseFloat(m[1]) * mult)
 }

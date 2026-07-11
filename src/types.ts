@@ -19,6 +19,12 @@ export interface BackendConfig {
   engine?: import('./db/engine.js').DbEngine
   /** Secret used to sign/verify every JWT. Defaults to the Supabase local-dev secret. */
   jwtSecret?: string
+  /**
+   * Key used to encrypt Vault secrets at rest (pgcrypto). Held only in a session
+   * GUC, never stored in the database. Defaults to a value derived from
+   * jwtSecret; set a dedicated key in production.
+   */
+  vaultKey?: string
   /** External URL of this backend, used as JWT issuer. */
   siteUrl?: string
   /** Access token lifetime in seconds (default 3600). */
@@ -47,6 +53,14 @@ export interface BackendConfig {
   netFetch?: typeof fetch
   /** Print startup/debug logs. */
   log?: (msg: string) => void
+  /**
+   * Log the full body of auth emails (OTP codes, magic links) to the server log.
+   * Off by default so secrets don't land in log files; the /inbox dev UI still
+   * shows the full body regardless. Enable only for local debugging.
+   */
+  logMailBody?: boolean
+  /** Data-retention windows for the background cleanup sweep. */
+  retention?: import('./retention/service.js').RetentionConfig
 }
 
 export interface MailMessage {

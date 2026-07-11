@@ -109,4 +109,139 @@ describe('auth', () => {
     const { error } = await env.supabase.auth.admin.listUsers()
     expect(error).not.toBeNull()
   })
+
+  it('exports a user\'s data (GDPR access) without leaking credentials', async () => {
+    const created = await env.admin.auth.admin.createUser({
+      email: 'export-me@example.com',
+      password: 'password123',
+      email_confirm: true,
+      user_metadata: { plan: 'pro' },
+    })
+    const id = created.data.user!.id
+
+    const res = await env.backend.fetch(
+      new Request(`http://localhost:54321/auth/v1/admin/users/${id}/export`, {
+        headers: { apikey: env.backend.serviceRoleKey, authorization: `Bearer ${env.backend.serviceRoleKey}` },
+      })
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.user.email).toBe('export-me@example.com')
+    expect(body.user.user_metadata).toEqual({ plan: 'pro' })
+    expect(Array.isArray(body.identities)).toBe(true)
+    expect(Array.isArray(body.sessions)).toBe(true)
+    expect(Array.isArray(body.mfa_factors)).toBe(true)
+    // the password hash must never appear anywhere in the export
+    expect(JSON.stringify(body)).not.toContain('encrypted_password')
+  })
+
+  it('erases a user and cascades their auth rows (GDPR erasure)', async () => {
+    const created = await env.admin.auth.admin.createUser({
+      email: 'erase-me@example.com',
+      password: 'password123',
+      email_confirm: true,
+    })
+    const id = created.data.user!.id
+
+    const res = await env.backend.fetch(
+      new Request(`http://localhost:54321/auth/v1/admin/users/${id}`, {
+        method: 'DELETE',
+        headers: { apikey: env.backend.serviceRoleKey, authorization: `Bearer ${env.backend.serviceRoleKey}` },
+      })
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.erased).toBe(true)
+
+    // the user is gone
+    const gone = await env.admin.auth.admin.getUserById(id)
+    expect(gone.data.user).toBeNull()
+
+    // erasing a non-existent user returns 404
+    const missing = await env.backend.fetch(
+      new Request(`http://localhost:54321/auth/v1/admin/users/${id}`, {
+        method: 'DELETE',
+        headers: { apikey: env.backend.serviceRoleKey, authorization: `Bearer ${env.backend.serviceRoleKey}` },
+      })
+    )
+    expect(missing.status).toBe(404)
+  })
+
+  it('export rejects the anon key', async () => {
+    const res = await env.backend.fetch(
+      new Request(`http://localhost:54321/auth/v1/admin/users/00000000-0000-0000-0000-000000000000/export`, {
+        headers: { apikey: env.backend.anonKey, authorization: `Bearer ${env.backend.anonKey}` },
+      })
+    )
+    expect(res.status).toBe(403)
+  })
+
+  it('records auth events in the audit log', async () => {
+    const email = `audit-${Date.now()}@example.com`
+    await env.supabase.auth.signUp({ email, password: 'password123' })
+    await env.supabase.auth.signInWithPassword({ email, password: 'wrong' }) // failed login
+    await env.supabase.auth.signInWithPassword({ email, password: 'password123' }) // success
+    await env.supabase.auth.signOut()
+
+    const res = await env.backend.fetch(
+      new Request('http://localhost:54321/auth/v1/admin/audit', {
+        headers: { apikey: env.backend.serviceRoleKey, authorization: `Bearer ${env.backend.serviceRoleKey}` },
+      })
+    )
+    expect(res.status).toBe(200)
+    const { entries } = (await res.json()) as { entries: { payload: { action: string; actor_username: string | null } }[] }
+    const actions = entries.map((e) => e.payload.action)
+    expect(actions).toContain('user_signedup')
+    expect(actions).toContain('login')
+    expect(actions).toContain('login_failed')
+    expect(actions).toContain('logout')
+  })
+
+  it('audit log rejects the anon key', async () => {
+    const res = await env.backend.fetch(
+      new Request('http://localhost:54321/auth/v1/admin/audit', {
+        headers: { apikey: env.backend.anonKey, authorization: `Bearer ${env.backend.anonKey}` },
+      })
+    )
+    expect(res.status).toBe(403)
+  })
+})
+
+describe('auth OTP brute-force protection', () => {
+  const key = env => env.backend.anonKey
+  const authFetch = (env: TestEnv, path: string, body: unknown) =>
+    env.backend.fetch(
+      new Request(`http://localhost:54321/auth/v1/${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', apikey: env.backend.anonKey },
+        body: JSON.stringify(body),
+      })
+    )
+
+  it('locks out an OTP after too many wrong guesses', async () => {
+    env.backend.inbox!.clear()
+    const email = `otp-brute-${Date.now()}@example.com`
+    await authFetch(env, 'otp', { email })
+    const realCode = env.backend.inbox!.list()[0].code!
+
+    // 5 wrong guesses trip the lockout
+    for (let i = 0; i < 5; i++) {
+      const r = await authFetch(env, 'verify', { type: 'email', email, token: '000000' })
+      expect(r.status).toBe(403)
+    }
+    // even the correct code is now rejected — the token was burned
+    const good = await authFetch(env, 'verify', { type: 'email', email, token: realCode })
+    expect(good.status).toBe(403)
+  })
+
+  it('does not let a login OTP redeem as a recovery session', async () => {
+    env.backend.inbox!.clear()
+    const email = `otp-type-${Date.now()}@example.com`
+    await authFetch(env, 'otp', { email })
+    const code = env.backend.inbox!.list()[0].code!
+
+    // the same 6-digit code must not be accepted as a recovery token
+    const asRecovery = await authFetch(env, 'verify', { type: 'recovery', email, token: code })
+    expect(asRecovery.status).toBe(403)
+  })
 })

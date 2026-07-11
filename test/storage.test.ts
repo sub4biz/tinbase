@@ -30,6 +30,17 @@ describe('storage', () => {
     expect(upd.error).toBeNull()
   })
 
+  it('rejects a bucket with an unparseable file_size_limit', async () => {
+    const res = await env.backend.fetch(
+      new Request('http://localhost:54321/storage/v1/bucket', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', apikey: env.backend.serviceRoleKey },
+        body: JSON.stringify({ name: 'bad-limit', id: 'bad-limit', file_size_limit: '10 megabytes' }),
+      })
+    )
+    expect(res.status).toBe(400)
+  })
+
   it('rejects bucket creation with anon key', async () => {
     const { error } = await env.supabase.storage.createBucket('nope')
     expect(error).not.toBeNull()
@@ -83,6 +94,17 @@ describe('storage', () => {
     expect(res.headers.get('content-type')).toBe('image/png')
   })
 
+  it('forces active content types to download (stored-XSS guard)', async () => {
+    await env.supabase.storage
+      .from('avatars')
+      .upload('evil.html', new Blob(['<script>alert(1)</script>'], { type: 'text/html' }), { upsert: true })
+    const { data } = env.supabase.storage.from('avatars').getPublicUrl('evil.html')
+    const res = await env.backend.fetch(new Request(data.publicUrl))
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(res.headers.get('content-disposition')).toBe('attachment')
+  })
+
   it('denies public URL for private buckets', async () => {
     const { data } = env.supabase.storage.from('docs').getPublicUrl('root.txt')
     const res = await env.backend.fetch(new Request(data.publicUrl))
@@ -100,6 +122,23 @@ describe('storage', () => {
     const bad = signed.data!.signedUrl.replace(/token=.{10}/, 'token=tampered')
     const badRes = await env.backend.fetch(new Request(bad))
     expect(badRes.status).toBe(400)
+  })
+
+  it('rejects a download token replayed at the upload endpoint', async () => {
+    // a download-scoped signed URL token must not be usable to write objects
+    const signed = await env.supabase.storage.from('docs').createSignedUrl('root.txt', 60)
+    const token = new URL(signed.data!.signedUrl, 'http://x').searchParams.get('token')!
+    const res = await env.backend.fetch(
+      new Request(`http://x/storage/v1/object/upload/sign/docs/pwned.txt?token=${token}`, {
+        method: 'PUT',
+        headers: { apikey: env.backend.anonKey },
+        body: 'attacker bytes',
+      })
+    )
+    expect(res.status).toBe(400)
+    // the write must not have landed
+    const check = await env.admin.storage.from('docs').download('pwned.txt')
+    expect(check.error).not.toBeNull()
   })
 
   it('moves and copies objects', async () => {

@@ -28,6 +28,7 @@ export interface OAuthProviderConfig {
 export interface OAuthProfile {
   id: string
   email?: string
+  emailVerified?: boolean
   name?: string
   metadata?: Record<string, unknown>
 }
@@ -43,7 +44,13 @@ const PRESETS: Record<string, Partial<OAuthProviderConfig>> = {
     tokenUrl: 'https://oauth2.googleapis.com/token',
     userInfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo',
     scopes: 'openid email profile',
-    profileMap: (r) => ({ id: r.sub, email: r.email, name: r.name, metadata: { avatar_url: r.picture, full_name: r.name } }),
+    profileMap: (r) => ({
+      id: r.sub,
+      email: r.email,
+      emailVerified: r.email_verified === true,
+      name: r.name,
+      metadata: { avatar_url: r.picture, full_name: r.name },
+    }),
   },
   github: {
     authorizeUrl: 'https://github.com/login/oauth/authorize',
@@ -232,21 +239,33 @@ export class OAuthService {
       return existing.rows[0].user_id
     }
 
-    // link to an existing user with the same email, else create one
+    // Link to an existing user with the same email ONLY when the provider
+    // asserts the email is verified — otherwise an attacker could register a
+    // provider account with a victim's unverified email and take over their
+    // account. Unverified → fall through and create a separate user.
     let userId: string | undefined
-    if (profile.email) {
-      const byEmail = await this.db.query<{ id: string }>(`select id from auth.users where email = $1`, [
-        profile.email.toLowerCase(),
-      ])
+    const email = profile.email?.toLowerCase() ?? null
+    const verified = !!profile.email && profile.emailVerified === true
+    if (email && verified) {
+      const byEmail = await this.db.query<{ id: string }>(`select id from auth.users where email = $1`, [email])
       userId = byEmail.rows[0]?.id
     }
     if (!userId) {
+      // Only claim the email on the new user when the provider verified it AND
+      // it isn't already owned by another account. An unverified or taken email
+      // is left null so it can't collide with (or hijack) an existing user.
+      let userEmail: string | null = verified ? email : null
+      if (userEmail) {
+        const taken = await this.db.query(`select 1 from auth.users where email = $1`, [userEmail])
+        if (taken.rows.length > 0) userEmail = null
+      }
       const created = await this.db.query<{ id: string }>(
         `insert into auth.users (aud, role, email, email_confirmed_at, last_sign_in_at, raw_app_meta_data, raw_user_meta_data)
-         values ('authenticated','authenticated',$1, now(), now(),
-                 $2::jsonb, $3::jsonb) returning id`,
+         values ('authenticated','authenticated',$1, $2, now(),
+                 $3::jsonb, $4::jsonb) returning id`,
         [
-          profile.email?.toLowerCase() ?? null,
+          userEmail,
+          userEmail ? new Date().toISOString() : null,
           JSON.stringify({ provider, providers: [provider] }),
           JSON.stringify({ sub: profile.id, email: profile.email, full_name: profile.name, ...profile.metadata }),
         ]
