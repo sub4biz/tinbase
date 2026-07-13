@@ -327,6 +327,51 @@ describe('csv output', () => {
   })
 })
 
+describe('aggregates', () => {
+  const TAG = 'agg fixture'
+  beforeAll(async () => {
+    await env.admin.from('posts').insert([
+      { title: TAG, author_id: 1, views: 10 },
+      { title: TAG, author_id: 1, views: 20 },
+      { title: TAG, author_id: 2, views: 5 },
+    ])
+  })
+  afterAll(async () => {
+    await env.admin.from('posts').delete().eq('title', TAG)
+  })
+
+  it('count() returns the row count', async () => {
+    const { data, error } = await env.admin.from('posts').select('count()').eq('title', TAG)
+    expect(error).toBeNull()
+    expect(data).toEqual([{ count: 3 }])
+  })
+
+  it('sum/max over a filtered set', async () => {
+    const { data, error } = await env.admin
+      .from('posts')
+      .select('total:views.sum(), views.max()')
+      .eq('title', TAG)
+    expect(error).toBeNull()
+    const row = (data as Array<{ total: number; max: number }>)[0]
+    expect(Number(row.total)).toBe(35)
+    expect(Number(row.max)).toBe(20)
+  })
+
+  it('groups by a non-aggregate column', async () => {
+    const { data, error } = await env.admin
+      .from('posts')
+      .select('author_id, views.sum()')
+      .eq('title', TAG)
+      .order('author_id')
+    expect(error).toBeNull()
+    const rows = data as Array<{ author_id: number; sum: number }>
+    expect(rows.map((r) => [r.author_id, Number(r.sum)])).toEqual([
+      [1, 30],
+      [2, 5],
+    ])
+  })
+})
+
 describe('explain', () => {
   it('returns a text plan by default', async () => {
     const { data, error } = await env.supabase.from('posts').select().explain()

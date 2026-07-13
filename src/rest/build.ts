@@ -75,6 +75,9 @@ export class QueryBuilder {
   buildSelect(table: string, opts: { count?: boolean } = {}): BuiltQuery {
     this.table(table)
     const alias = 't0'
+    if (this.q.select.some((i) => i.kind === 'column' && i.aggregate)) {
+      return this.buildAggregateSelect(table, alias, opts)
+    }
     const { exprs, innerConds } = this.buildSelectList(this.q.select, table, alias, [])
     const where = this.baseWhere(alias, innerConds)
     const order = this.renderOrder([], alias)
@@ -88,6 +91,49 @@ export class QueryBuilder {
       countSql: opts.count
         ? `select count(*)::int as count from ${this.qualify(table)} as ${quoteIdent(alias)}${where}`
         : undefined,
+    }
+  }
+
+  /**
+   * Aggregate select: `count()`, `col.sum()`, `col.avg()`, `col.max()`,
+   * `col.min()`. Any non-aggregate column becomes an implicit GROUP BY key, so
+   * `select=author_id,views.sum()` yields one row per author. Output keys are
+   * the aggregate name (or the column's alias) and the grouping column names.
+   */
+  private buildAggregateSelect(table: string, alias: string, opts: { count?: boolean }): BuiltQuery {
+    const selExprs: string[] = []
+    const groupExprs: string[] = []
+    for (const item of this.q.select) {
+      if (item.kind !== 'column') {
+        throw new ParseError('embedded resources cannot be combined with aggregate functions')
+      }
+      if (item.name === '*') {
+        throw new ParseError('"*" cannot be combined with aggregate functions')
+      }
+      const cast = item.cast ? `::${sanitizeCast(item.cast)}` : ''
+      if (item.aggregate) {
+        const call =
+          item.name === ''
+            ? `${item.aggregate}(*)` // bare count()
+            : `${item.aggregate}(${renderColumnExpr(alias, item.name)})`
+        const out = item.alias ?? item.aggregate
+        selExprs.push(`${call}${cast} as ${quoteIdent(out)}`)
+      } else {
+        const expr = renderColumnExpr(alias, item.name)
+        const out = item.alias ?? defaultAliasFor(item.name)
+        selExprs.push(`${expr}${cast} as ${quoteIdent(out)}`)
+        groupExprs.push(expr)
+      }
+    }
+    const where = this.baseWhere(alias, [])
+    const groupBy = groupExprs.length > 0 ? ` group by ${groupExprs.join(', ')}` : ''
+    const body = `select ${selExprs.join(', ')} from ${this.qualify(table)} as ${quoteIdent(alias)}${where}${groupBy}`
+    const core = `${body}${this.renderOrder([], alias)}${this.renderLimitOffset('')}`
+    this.assertAllPathsConsumed()
+    return {
+      sql: `select coalesce(json_agg(row_to_json(_r)), ${AGG_EMPTY}) as body from (${core}) _r`,
+      params: [],
+      countSql: opts.count ? `select count(*)::int as count from (${body}) _c` : undefined,
     }
   }
 
