@@ -60,6 +60,11 @@ const FEATURES = [
     icon: 'browser',
     body: 'Every service is a pure fetch handler. Hand it to supabase-js as a custom fetch and the entire backend — database included — runs in-process, no server.',
   },
+  {
+    title: 'Or bring your own Postgres',
+    icon: 'database',
+    body: 'Point tinbase at a Postgres you already run with --database-url — REST, Auth, and Storage against your own database, over TCP with SCRAM auth and an idempotent, shared-safe bootstrap.',
+  },
 ]
 
 const CODE = `import { createClient } from '@supabase/supabase-js'
