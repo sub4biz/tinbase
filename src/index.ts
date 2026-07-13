@@ -96,7 +96,14 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
   // JWT secret so vault secrets are encrypted at rest out of the box (better
   // than the old plaintext store). Set a dedicated vaultKey in production.
   const vaultKey = config.vaultKey ?? `tinbase-vault:${jwtSecret}`
-  const db = await Database.create(config.engine ?? config.dataDir, { vaultKey })
+  // Resolve an external-Postgres engine on demand (Node only) so the browser
+  // core never imports the wire client.
+  let engine = config.engine
+  if (!engine && config.databaseUrl) {
+    const { createDatabaseUrlEngine } = await import('./node/native/database-url.js')
+    engine = await createDatabaseUrlEngine({ databaseUrl: config.databaseUrl, log })
+  }
+  const db = await Database.create(engine ?? config.dataDir, { vaultKey })
   if (config.migrations?.length || config.seedSql) {
     const applied = await db.runMigrations(config.migrations ?? [], config.seedSql)
     if (applied.length > 0) log(`applied migrations: ${applied.join(', ')}`)
@@ -136,7 +143,7 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
     oauthProviders: config.oauthProviders,
     oauthFetch: config.oauthFetch,
   })
-  const storage = new StorageHandler(db, config.storageDriver ?? new MemoryStorageDriver(), { jwtSecret })
+  const storage = new StorageHandler(db, config.storageDriver ?? new MemoryStorageDriver(), { jwtSecret, log })
   const realtime = new RealtimeEngine(db, jwtSecret)
   await realtime.start()
 
@@ -232,7 +239,12 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
     }
 
     // public endpoints that skip apikey checks
-    if (path.startsWith('/storage/v1/object/public/') || path.startsWith('/storage/v1/object/sign/')) {
+    if (
+      path.startsWith('/storage/v1/object/public/') ||
+      path.startsWith('/storage/v1/object/sign/') ||
+      path.startsWith('/storage/v1/render/image/public/') ||
+      path.startsWith('/storage/v1/render/image/sign/')
+    ) {
       if (req.method === 'GET' || req.method === 'HEAD') {
         return withCors(await storage.handle(req, { role: 'anon', claims: null }, url))
       }
