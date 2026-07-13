@@ -136,7 +136,9 @@ tinbase db diff    # DDL for out-of-migration schema changes
       --data-dir <path> data dir (default <dir>/.tinbase/db)
       --jwt-secret <s>  JWT secret (or TINBASE_JWT_SECRET)
       --memory          in-memory database (wasm engine)
-      --engine <e>      native (default), wasm, or pgmem`}</Pre>
+      --engine <e>      native (default), wasm, or pgmem
+      --database-url <url>  use an external Postgres you already run
+                            (postgres://…; or DATABASE_URL env)`}</Pre>
 
           <H2 id="engines">Engines</H2>
           <P>
@@ -175,6 +177,19 @@ tinbase db diff    # DDL for out-of-migration schema changes
             The wasm and native engines run identical bootstrap, migrations, RLS, and realtime CDC.
             The full test suite passes on both:{' '}
             <code className={IC}>TINBASE_TEST_ENGINE=native npm test</code>.
+          </P>
+          <P>
+            <strong className="text-fg">External Postgres</strong> — point tinbase at a Postgres you
+            already run instead of the embedded engine:{' '}
+            <code className={IC}>tinbase start --database-url postgres://user:pass@host:5432/db</code>{' '}
+            (or the <code className={IC}>DATABASE_URL</code> env, or{' '}
+            <code className={IC}>createBackend(&#123; databaseUrl &#125;)</code>). REST, Auth, and
+            Storage all run against it. Connects over TCP with{' '}
+            <strong className="text-fg">SCRAM-SHA-256</strong> (or md5) auth, and the target is treated
+            as shared: the bootstrap runs idempotently and migrations/seed stay tracked, so it never
+            assumes an empty database or exclusive ownership. TLS/<code className={IC}>sslmode</code>{' '}
+            (for most managed providers), realtime CDC without superuser, and connection pooling are
+            in progress.
           </P>
 
           <H2 id="single-binary">Single binary</H2>
@@ -341,9 +356,9 @@ const supabase = createClient('http://localhost', backend.anonKey, {
               </thead>
               <tbody className="text-muted">
                 {[
-                  ['Database (postgrest-js)', '~85%', 'aggregates in select, .explain(), .csv()'],
+                  ['Database (postgrest-js)', '~95%', 'aggregates within embeds'],
                   ['Auth (auth-js)', '~80%', 'MFA, SSO/SAML, phone auth'],
-                  ['Storage (storage-js)', '~80%', 'resumable uploads, image transforms'],
+                  ['Storage (storage-js)', '~90%', 'image transforms (served as no-op)'],
                   ['Realtime (realtime-js)', '~85%', 'per-row DELETE RLS, private channels'],
                   ['Edge Functions', '~70%', 'npm:/jsr: import resolution, secrets'],
                   ['Type generation', '~85%', 'composite-type args, multi-schema'],
