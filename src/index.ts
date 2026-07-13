@@ -96,7 +96,14 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
   // JWT secret so vault secrets are encrypted at rest out of the box (better
   // than the old plaintext store). Set a dedicated vaultKey in production.
   const vaultKey = config.vaultKey ?? `tinbase-vault:${jwtSecret}`
-  const db = await Database.create(config.engine ?? config.dataDir, { vaultKey })
+  // Resolve an external-Postgres engine on demand (Node only) so the browser
+  // core never imports the wire client.
+  let engine = config.engine
+  if (!engine && config.databaseUrl) {
+    const { createDatabaseUrlEngine } = await import('./node/native/database-url.js')
+    engine = await createDatabaseUrlEngine({ databaseUrl: config.databaseUrl, log })
+  }
+  const db = await Database.create(engine ?? config.dataDir, { vaultKey })
   if (config.migrations?.length || config.seedSql) {
     const applied = await db.runMigrations(config.migrations ?? [], config.seedSql)
     if (applied.length > 0) log(`applied migrations: ${applied.join(', ')}`)

@@ -120,18 +120,22 @@ in the theseus native Postgres binaries or this PGlite build. Two tracks:
 Requested on X: *"Would be nice if it could use an external PG instance."* Point
 tinbase's REST, Auth, Storage, and Realtime at a Postgres you already run
 instead of the embedded PGlite/native engine.
-- [ ] A `--database-url postgres://…` (and `createBackend({ databaseUrl })`)
-      engine: a new `DbEngine` adapter over the wire protocol, so nothing above
-      the adapter changes. Reuses the existing native `PgWireClient`.
-- [ ] Treat the target as shared/pre-existing: bootstrap idempotently, keep the
-      `supabase_migrations` conventions, and never assume exclusive ownership or
-      that it starts empty.
+- [x] A `--database-url postgres://…` (and `createBackend({ databaseUrl })`)
+      engine: a `DbEngine` adapter over the wire protocol, so nothing above the
+      adapter changes. Reuses `PgWireClient` + a shared `buildWireEngine`; added
+      cleartext/md5/**SCRAM-SHA-256** auth for TCP. Verified against a real
+      Postgres launched on TCP with SCRAM (no Docker).
+- [x] Treat the target as shared/pre-existing: bootstrap runs idempotently and
+      migrations/seed stay tracked in `supabase_migrations`, so a second boot
+      against the same database neither errors nor re-applies. Never assumes an
+      empty DB or exclusive ownership.
 - [ ] Bonus — a BYO Postgres that already has `pg_cron` / `pg_net` / `pgvector`
       gives you those for real, an alternative to bundling extension binaries
-      (Phase 4).
-- Open questions: the single-writer model vs a real connection (pool?); RLS role
-  switching (needs the target's `anon`/`authenticated` roles, or we create them);
-  realtime CDC without superuser/replication rights on a managed database.
+      (Phase 4). (Largely implied now — migrations using them run as-is.)
+- Deferred follow-ups: **TLS / sslmode** (needed for most managed PGs — Neon,
+  Supabase, RDS); realtime CDC without superuser/replication rights; connection
+  pooling (single-writer today); provisioning the target's `anon`/`authenticated`
+  roles when absent.
 - Boundary: this is "bring your own local/dev Postgres," not managing a remote
   Supabase Cloud project — hosting/pooling/replicas stay [out of scope](#scope-what-we-match-and-what-we-deliberately-dont).
 
