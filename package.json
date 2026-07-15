@@ -54,7 +54,7 @@
     "type": "git",
     "url": "git+https://github.com/tinbase/tinbase.git"
   },
-  "homepage": "https://tinbase.vercel.app",
+  "homepage": "https://tinbase.dev",
   "bugs": {
     "url": "https://github.com/tinbase/tinbase/issues"
   },
