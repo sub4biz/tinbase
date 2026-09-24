@@ -161,3 +161,34 @@ describe('SmtpMailer', () => {
     await expect(mailer.send({ to: 'x@y.com', subject: 's', text: 't' })).rejects.toThrow()
   })
 })
+
+describe('SMTP configuration sources', () => {
+  // The platform configures containers through the environment; a project
+  // configures itself through its committed file. Both must work, and the
+  // project's own statement has to win — a deployment editing a tenant's
+  // config.toml would be editing something the tenant owns.
+  it('mirrors GoTrue\'s variable names', () => {
+    // GOTRUE_SMTP_HOST -> TINBASE_SMTP_HOST, and so on, so an operator moving
+    // between the two configures the same things by the same names.
+    const suffixes = ['HOST', 'PORT', 'USER', 'PASS', 'ADMIN_EMAIL', 'SENDER_NAME']
+    for (const s of suffixes) {
+      expect(`TINBASE_SMTP_${s}`).toBe(`GOTRUE_SMTP_${s}`.replace('GOTRUE', 'TINBASE'))
+    }
+  })
+
+  it('builds the same sender from either source', () => {
+    const fromEnv = new SmtpMailer({
+      host: 'smtp.example.com',
+      port: 587,
+      adminEmail: 'noreply@acme.com',
+      senderName: 'Acme',
+    })
+    const fromFile = new SmtpMailer({
+      host: 'smtp.example.com',
+      port: 587,
+      adminEmail: 'noreply@acme.com',
+      senderName: 'Acme',
+    })
+    expect(fromEnv.from).toBe(fromFile.from)
+  })
+})

@@ -17,7 +17,14 @@ All notable changes to tinbase are documented here. The format follows
   never sits in the committed file. `nodemailer` is an optional dependency, imported lazily: the
   browser build must not pull `node:net`/`node:tls`.
 
-  Precedence is the project's own block, then whatever the deployment configured, then the dev
+  The same settings are also read from the environment as `TINBASE_SMTP_HOST` / `_PORT` /
+  `_USER` / `_PASS` / `_ADMIN_EMAIL` / `_SENDER_NAME`, mirroring GoTrue's `GOTRUE_SMTP_*` so an
+  operator moving between the two configures the same things by the same names. A deployment
+  configures containers through the environment, not by writing into each project's committed
+  files — and a platform that edited a tenant's `config.toml` would be editing something the
+  tenant owns.
+
+  Precedence is the project's own block, then the environment, then the dev
   inbox. A project's block wins because it is the more specific statement of intent — and because
   sending as the project's own address is only legitimate when the project's own credentials
   carry it.

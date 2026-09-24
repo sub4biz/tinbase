@@ -444,9 +444,16 @@ Email (env):
                           api.resend.com (a platform gateway that holds the real
                           key and meters each tenant)
 
-A project sends its own mail instead by adding [auth.email.smtp] to
-supabase/config.toml (host, port, user, pass, admin_email, sender_name) - any
-SMTP provider. That takes precedence over the variables above.
+SMTP (env, mirroring GOTRUE_SMTP_*):
+  TINBASE_SMTP_HOST         mail server to send through - any SMTP provider
+  TINBASE_SMTP_PORT         default 587
+  TINBASE_SMTP_USER
+  TINBASE_SMTP_PASS
+  TINBASE_SMTP_ADMIN_EMAIL  address mail is sent from
+  TINBASE_SMTP_SENDER_NAME  display name beside it
+
+A project overrides all of the above with [auth.email.smtp] in
+supabase/config.toml (host, port, user, pass, admin_email, sender_name).
   TINBASE_SITE_URL        public URL emailed links are built on (overrides
                           config.toml auth.site_url and the bound address)
   TINBASE_URI_ALLOW_LIST  comma-separated redirect targets to allow in addition
@@ -692,7 +699,29 @@ async function main(): Promise<void> {
   // is only legitimate when the project's own credentials carry it. On the
   // platform path the sender stays whatever the deployment set, so a tenant
   // cannot mail as someone else on the deployment's reputation.
-  const smtpCfg = cfg.auth.smtp
+  // SMTP from two places, project first. The names mirror GoTrue's
+  // (GOTRUE_SMTP_* -> TINBASE_SMTP_*) so an operator moving between the two
+  // configures the same things by the same names.
+  //
+  // Env exists because a deployment configures containers through the
+  // environment, not by writing into each project's committed files - and a
+  // platform that edited a tenant's config.toml would be editing something the
+  // tenant owns. config.toml still wins: a project asking to send its own mail
+  // is the more specific instruction.
+  const envSmtpHost = process.env.TINBASE_SMTP_HOST
+  const smtpCfg = cfg.auth.smtp?.host
+    ? cfg.auth.smtp
+    : envSmtpHost
+      ? {
+          enabled: true,
+          host: envSmtpHost,
+          port: process.env.TINBASE_SMTP_PORT ? parseInt(process.env.TINBASE_SMTP_PORT, 10) : 587,
+          user: process.env.TINBASE_SMTP_USER,
+          pass: process.env.TINBASE_SMTP_PASS,
+          adminEmail: process.env.TINBASE_SMTP_ADMIN_EMAIL,
+          senderName: process.env.TINBASE_SMTP_SENDER_NAME,
+        }
+      : undefined
   const useProjectSmtp = !!smtpCfg?.host && smtpCfg.enabled !== false
   const resendApiKey = process.env.TINBASE_RESEND_API_KEY
   const mailFrom = process.env.TINBASE_MAIL_FROM
@@ -711,7 +740,7 @@ async function main(): Promise<void> {
         secure: smtpCfg!.secure,
       })
       mailer = m
-      mailDescription = `SMTP ${smtpCfg!.host}:${smtpCfg!.port ?? 587} (from ${m.from})`
+      mailDescription = `SMTP ${smtpCfg!.host}:${smtpCfg!.port ?? 587} (from ${m.from})${cfg.auth.smtp?.host ? '' : ' [env]'}`
     } catch (e) {
       console.error(`auth.email.smtp: ${e instanceof Error ? e.message : String(e)}`)
       process.exit(1)
