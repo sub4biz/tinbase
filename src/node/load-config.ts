@@ -71,6 +71,11 @@ export interface AuthConfig {
    * substitution, so the secret never has to sit in the committed file.
    */
   smtp?: { enabled?: boolean; host?: string; port?: number; user?: string; pass?: string; adminEmail?: string; senderName?: string; secure?: boolean }
+  /**
+   * `[auth.hook.send_email]`: hand the email to an endpoint instead of sending
+   * it. Outranks every transport, because it replaces the rendering too.
+   */
+  sendEmailHook?: { enabled?: boolean; uri?: string; secret?: string }
 }
 
 /** The `[api]` slice of config.toml. */
@@ -142,6 +147,19 @@ function readAuth(root: ConfigTable, env: NodeJS.ProcessEnv): AuthConfig {
 
   const smtp = readSmtp(root)
   if (smtp) out.smtp = smtp
+  const hook = tableAt(root, 'auth.hook.send_email')
+  if (hook) {
+    const enabled = getBool(hook, 'enabled')
+    const uri = getString(hook, 'uri')
+    const secret = getString(hook, 'secret')
+    if (enabled !== undefined || uri !== undefined || secret !== undefined) {
+      out.sendEmailHook = {
+        ...(enabled !== undefined ? { enabled } : {}),
+        ...(uri !== undefined ? { uri } : {}),
+        ...(secret !== undefined ? { secret } : {}),
+      }
+    }
+  }
 
   const sessions = tableAt(root, 'auth.sessions')
   const timebox = getDurationSeconds(sessions, 'timebox')

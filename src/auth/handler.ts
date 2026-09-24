@@ -11,6 +11,7 @@ import { qrSvgDataUri } from './qr.js'
 import { DEFAULT_AUTH_SETTINGS, type AuthSettings } from './settings.js'
 import { resolveRedirect } from './redirect.js'
 import { htmlToText, renderTemplate, type EmailTemplateName, type EmailTemplates } from './templates.js'
+import { callSendEmailHook, type EmailActionType, type SendEmailHookConfig } from './send-email-hook.js'
 import { RateLimiter } from './rate-limit.js'
 import { generateTotpSecret, otpauthUri, verifyTotp } from './totp.js'
 
@@ -33,6 +34,14 @@ export interface AuthConfig {
    * Types without an override keep the built-in default.
    */
   emailTemplates?: EmailTemplates
+  /**
+   * `[auth.hook.send_email]`. When set, the email is handed to this endpoint
+   * instead of being rendered and sent here - the endpoint owns the wording,
+   * the format and the provider.
+   */
+  sendEmailHook?: SendEmailHookConfig
+  /** Injectable fetch for the hook (tests capture the request). */
+  hookFetch?: typeof fetch
   /** OAuth providers to enable, keyed by provider name (google, github, …) */
   oauthProviders?: Record<string, OAuthProviderConfig>
   /** injectable fetch for the OAuth provider calls (tests use a mock provider) */
@@ -595,6 +604,29 @@ export class AuthHandler {
         : flavor === 'confirm'
           ? { subject: 'Confirm your email', action: 'Confirm your email', lead: 'Confirm your email address with this link:', code }
           : { subject: 'Your login code', action: 'Sign in', lead: 'Sign in with this link:', code }
+    // The hook replaces rendering, so it is consulted before any of it happens.
+    if (this.config.sendEmailHook) {
+      const actionType: EmailActionType =
+        tokenType === 'recovery' ? 'recovery' : flavor === 'confirm' ? 'signup' : 'magiclink'
+      await callSendEmailHook(
+        this.config.sendEmailHook,
+        {
+          user: this.userJson(minted.user),
+          email_data: {
+            token: code,
+            token_hash: linkToken,
+            redirect_to: redirectTo,
+            email_action_type: actionType,
+            site_url: this.config.siteUrl,
+            token_new: '',
+            token_hash_new: '',
+          },
+        },
+        this.config.hookFetch
+      )
+      return json(200, {})
+    }
+
     const templateName: EmailTemplateName =
       tokenType === 'recovery' ? 'recovery' : flavor === 'confirm' ? 'confirmation' : 'magic_link'
     const template = this.config.emailTemplates?.[templateName]

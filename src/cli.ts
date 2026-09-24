@@ -699,6 +699,23 @@ async function main(): Promise<void> {
   // is only legitimate when the project's own credentials carry it. On the
   // platform path the sender stays whatever the deployment set, so a tenant
   // cannot mail as someone else on the deployment's reputation.
+  // The hook replaces rendering as well as delivery, so it outranks every
+  // transport below: if an endpoint is going to compose and send the mail,
+  // there is nothing here left to do.
+  const hookCfg = cfg.auth.sendEmailHook
+  const sendEmailHook =
+    hookCfg?.uri && hookCfg.enabled !== false
+      ? { uri: hookCfg.uri, ...(hookCfg.secret ? { secret: hookCfg.secret } : {}) }
+      : undefined
+  if (sendEmailHook) {
+    try {
+      new URL(sendEmailHook.uri)
+    } catch {
+      console.error(`auth.hook.send_email: uri is not a valid URL: ${sendEmailHook.uri}`)
+      process.exit(1)
+    }
+  }
+
   // SMTP from two places, project first. The names mirror GoTrue's
   // (GOTRUE_SMTP_* -> TINBASE_SMTP_*) so an operator moving between the two
   // configures the same things by the same names.
@@ -722,12 +739,12 @@ async function main(): Promise<void> {
           senderName: process.env.TINBASE_SMTP_SENDER_NAME,
         }
       : undefined
-  const useProjectSmtp = !!smtpCfg?.host && smtpCfg.enabled !== false
+  const useProjectSmtp = !sendEmailHook && !!smtpCfg?.host && smtpCfg.enabled !== false
   const resendApiKey = process.env.TINBASE_RESEND_API_KEY
   const mailFrom = process.env.TINBASE_MAIL_FROM
   const resendEndpoint = process.env.TINBASE_RESEND_ENDPOINT || undefined
   let mailer: Mailer | undefined
-  let mailDescription = ''
+  let mailDescription = sendEmailHook ? `send-email hook \u2192 ${new URL(sendEmailHook.uri).host}` : ''
   if (useProjectSmtp) {
     try {
       const m = new SmtpMailer({
@@ -745,7 +762,7 @@ async function main(): Promise<void> {
       console.error(`auth.email.smtp: ${e instanceof Error ? e.message : String(e)}`)
       process.exit(1)
     }
-  } else if (resendApiKey) {
+  } else if (resendApiKey && !sendEmailHook) {
     if (!mailFrom) {
       console.error('TINBASE_RESEND_API_KEY is set but TINBASE_MAIL_FROM is not (e.g. "My App <noreply@example.com>")')
       process.exit(1)
@@ -819,6 +836,7 @@ async function main(): Promise<void> {
     jwtSecret: opts.jwtSecret,
     mailer,
     emailTemplates,
+    sendEmailHook,
     // The public URL emailed links and redirects are built on. TINBASE_SITE_URL
     // wins (a platform injects the workload's public route - the bound address
     // inside a container is meaningless to a user's mail client), then
@@ -874,7 +892,7 @@ async function main(): Promise<void> {
 
            API URL: ${server.url}
           Admin UI: ${server.url}/_/
-             Email: ${mailer ? mailDescription : `dev inbox at ${server.url}/inbox (not delivered)`}
+             Email: ${sendEmailHook || mailer ? mailDescription : `dev inbox at ${server.url}/inbox (not delivered)`}
     Mail templates: ${Object.keys(emailTemplates).length ? Object.keys(emailTemplates).join(', ') : 'built-in defaults'}
           Site URL: ${siteUrl}
     Redirects to: ${uriAllowList.length ? uriAllowList.join(', ') : 'the site URL origin only'}

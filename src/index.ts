@@ -36,6 +36,7 @@ export { createPgliteEngine } from './db/pglite-engine.js'
 export { MemoryStorageDriver } from './storage/driver.js'
 export { InboxMailer, type InboxEntry } from './auth/inbox.js'
 export { ResendMailer, type ResendMailerOptions } from './auth/resend.js'
+export { callSendEmailHook, type SendEmailHookConfig, type SendEmailHookPayload, type EmailData, type EmailActionType } from './auth/send-email-hook.js'
 export { renderTemplate, htmlToText, type EmailTemplate, type EmailTemplates, type EmailTemplateName, type TemplateVars } from './auth/templates.js'
 export { LogBuffer, type LogEntry, type LogLevel } from './log-buffer.js'
 export { RealtimeEngine, type RealtimeSocketLike } from './realtime/engine.js'
@@ -248,6 +249,8 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
     sessionTimeboxSeconds: config.sessionTimeboxSeconds,
     mailer,
     emailTemplates: config.emailTemplates,
+    sendEmailHook: config.sendEmailHook,
+    hookFetch: config.hookFetch,
     oauthProviders: config.oauthProviders,
     oauthFetch: config.oauthFetch,
     uriAllowList: config.uriAllowList,
