@@ -4,6 +4,16 @@ All notable changes to tinbase are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow semver
 (pre-1.0, minor bumps may include breaking changes).
 
+## [0.16.1]
+
+### Fixed
+
+- `supabase/config.toml`: an array spread over several lines is now read. Previously only a
+  single-line array parsed; written the way Supabase itself writes a long one, the value read
+  back as the string `"["` and the setting was silently empty. For `additional_redirect_urls`
+  that left a project with no redirect allowlist, so every emailed link fell back to the site
+  URL with nothing reporting why.
+
 ## [0.16.0]
 
 ### Added
