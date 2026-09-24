@@ -7,6 +7,21 @@ All notable changes to tinbase are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`[auth.email.smtp]` — a project sends its own email.** Until now the only way to send real
+  mail was the Resend transport, which made our choice of provider everyone else's problem: to
+  send at all you had to open an account with the one vendor we happened to implement. SMTP is a
+  protocol rather than a vendor, so one implementation covers SES, Postmark, Mailgun, Resend or a
+  mail server you run yourself — and the block uses GoTrue's key names (`host`, `port`, `user`,
+  `pass`, `admin_email`, `sender_name`), so a project's configuration is portable between tinbase
+  and Supabase. `pass` goes through the parser's existing `env(VAR)` substitution, so the secret
+  never sits in the committed file. `nodemailer` is an optional dependency, imported lazily: the
+  browser build must not pull `node:net`/`node:tls`.
+
+  Precedence is the project's own block, then whatever the deployment configured, then the dev
+  inbox. A project's block wins because it is the more specific statement of intent — and because
+  sending as the project's own address is only legitimate when the project's own credentials
+  carry it.
+
 - **`TINBASE_RESEND_ENDPOINT`** points the Resend transport at a Resend-compatible API other than
   Resend itself. A platform running many tenants can then send through its own gateway: the
   gateway holds the real provider credential, so no tenant's container does, and it can attribute

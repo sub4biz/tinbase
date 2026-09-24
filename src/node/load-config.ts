@@ -64,6 +64,13 @@ export interface AuthConfig {
    * is shared with the browser build.
    */
   emailTemplates?: Record<string, { subject?: string; contentPath?: string }>
+  /**
+   * `[auth.email.smtp]`: the project's own mail server. Present means the
+   * project sends its own email rather than relying on whatever the deployment
+   * configured. `pass` arrives already resolved through the parser's `env(VAR)`
+   * substitution, so the secret never has to sit in the committed file.
+   */
+  smtp?: { enabled?: boolean; host?: string; port?: number; user?: string; pass?: string; adminEmail?: string; senderName?: string; secure?: boolean }
 }
 
 /** The `[api]` slice of config.toml. */
@@ -133,6 +140,9 @@ function readAuth(root: ConfigTable, env: NodeJS.ProcessEnv): AuthConfig {
   const templates = readEmailTemplates(root)
   if (templates) out.emailTemplates = templates
 
+  const smtp = readSmtp(root)
+  if (smtp) out.smtp = smtp
+
   const sessions = tableAt(root, 'auth.sessions')
   const timebox = getDurationSeconds(sessions, 'timebox')
   if (timebox !== undefined) out.sessionTimeboxSeconds = timebox
@@ -140,6 +150,34 @@ function readAuth(root: ConfigTable, env: NodeJS.ProcessEnv): AuthConfig {
   if (inactivity !== undefined) out.sessionInactivitySeconds = inactivity
 
   return out
+}
+
+/**
+ * `[auth.email.smtp]`, spelled as Supabase spells it so a project's block works
+ * on either. Returned as-is; the CLI decides whether to build a transport from
+ * it, since this module also runs where there is no network stack.
+ */
+function readSmtp(root: ConfigTable): AuthConfig['smtp'] | undefined {
+  const t = tableAt(root, 'auth.email.smtp')
+  if (!t) return undefined
+  const out: NonNullable<AuthConfig['smtp']> = {}
+  const enabled = getBool(t, 'enabled')
+  if (enabled !== undefined) out.enabled = enabled
+  const host = getString(t, 'host')
+  if (host !== undefined) out.host = host
+  const port = getInt(t, 'port')
+  if (port !== undefined) out.port = port
+  const user = getString(t, 'user')
+  if (user !== undefined) out.user = user
+  const pass = getString(t, 'pass')
+  if (pass !== undefined) out.pass = pass
+  const adminEmail = getString(t, 'admin_email')
+  if (adminEmail !== undefined) out.adminEmail = adminEmail
+  const senderName = getString(t, 'sender_name')
+  if (senderName !== undefined) out.senderName = senderName
+  const secure = getBool(t, 'secure')
+  if (secure !== undefined) out.secure = secure
+  return Object.keys(out).length ? out : undefined
 }
 
 /**

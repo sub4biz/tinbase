@@ -236,3 +236,44 @@ content_path = "./supabase/templates/magic_link.html"
     expect(loadProjectConfig(project(`[auth.email.template.recovery]\n`)).auth.emailTemplates).toBeUndefined()
   })
 })
+
+describe('loadProjectConfig — [auth.email.smtp]', () => {
+  it('reads the block with Supabase key names', () => {
+    const dir = project(`
+[auth.email.smtp]
+enabled = true
+host = "smtp.postmarkapp.com"
+port = 587
+user = "token"
+admin_email = "noreply@acme.com"
+sender_name = "Acme"
+`)
+    expect(loadProjectConfig(dir).auth.smtp).toEqual({
+      enabled: true,
+      host: 'smtp.postmarkapp.com',
+      port: 587,
+      user: 'token',
+      adminEmail: 'noreply@acme.com',
+      senderName: 'Acme',
+    })
+  })
+
+  it('resolves the password through env() so the secret stays out of the file', () => {
+    process.env.TB_TEST_SMTP_PASS = 's3cret'
+    try {
+      const dir = project(`
+[auth.email.smtp]
+host = "smtp.acme.com"
+pass = "env(TB_TEST_SMTP_PASS)"
+admin_email = "noreply@acme.com"
+`)
+      expect(loadProjectConfig(dir).auth.smtp?.pass).toBe('s3cret')
+    } finally {
+      delete process.env.TB_TEST_SMTP_PASS
+    }
+  })
+
+  it('is undefined when no block is present', () => {
+    expect(loadProjectConfig(project(`[auth]\nenabled = true\n`)).auth.smtp).toBeUndefined()
+  })
+})
