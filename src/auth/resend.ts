@@ -13,7 +13,7 @@ import type { MailMessage, Mailer } from '../types.js'
 
 export interface ResendMailerOptions {
   apiKey: string
-  /** RFC 5322 sender, e.g. `Savor <noreply@rnproject.dev>`. The domain must be verified in Resend. */
+  /** RFC 5322 sender, e.g. `Acme <noreply@acme.com>`. The domain must be verified with the provider. */
   from: string
   /** Injectable for tests; defaults to global fetch. */
   fetch?: typeof fetch

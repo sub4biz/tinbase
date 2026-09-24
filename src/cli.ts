@@ -438,6 +438,9 @@ Email (env):
   TINBASE_RESEND_API_KEY  deliver auth emails through Resend; without it they land
                           in the dev inbox at /inbox and are never sent
   TINBASE_MAIL_FROM       sender for Resend, e.g. "My App <noreply@example.com>"
+  TINBASE_RESEND_ENDPOINT send through a Resend-compatible gateway instead of
+                          api.resend.com (a platform gateway that holds the real
+                          key and meters each tenant)
   TINBASE_SITE_URL        public URL emailed links are built on (overrides
                           config.toml auth.site_url and the bound address)
   TINBASE_URI_ALLOW_LIST  comma-separated redirect targets to allow in addition
@@ -674,14 +677,31 @@ async function main(): Promise<void> {
   // than a silently dropped email later.
   const resendApiKey = process.env.TINBASE_RESEND_API_KEY
   const mailFrom = process.env.TINBASE_MAIL_FROM
+  const resendEndpoint = process.env.TINBASE_RESEND_ENDPOINT || undefined
   let mailer: ResendMailer | undefined
   if (resendApiKey) {
     if (!mailFrom) {
       console.error('TINBASE_RESEND_API_KEY is set but TINBASE_MAIL_FROM is not (e.g. "My App <noreply@example.com>")')
       process.exit(1)
     }
+    // Fail here rather than on the first email: a typo in the gateway URL would
+    // otherwise look like mail simply never arriving.
+    if (resendEndpoint !== undefined) {
+      try {
+        new URL(resendEndpoint)
+      } catch {
+        console.error(`TINBASE_RESEND_ENDPOINT is not a valid URL: ${resendEndpoint}`)
+        process.exit(1)
+      }
+    }
     try {
-      mailer = new ResendMailer({ apiKey: resendApiKey, from: mailFrom })
+      // TINBASE_RESEND_ENDPOINT points the transport at a Resend-compatible API
+      // other than Resend itself. A platform running many tenants uses this to
+      // send through its own gateway: the gateway holds the real provider
+      // credential, so no tenant's container does, and it can attribute and cap
+      // each tenant's sending - which a shared credential going straight to the
+      // provider cannot. The payload shape is unchanged either way.
+      mailer = new ResendMailer({ apiKey: resendApiKey, from: mailFrom, endpoint: resendEndpoint })
     } catch (e) {
       console.error(e instanceof Error ? e.message : String(e))
       process.exit(1)
@@ -787,7 +807,7 @@ async function main(): Promise<void> {
 
            API URL: ${server.url}
           Admin UI: ${server.url}/_/
-             Email: ${mailer ? `Resend (from ${mailFrom})` : `dev inbox at ${server.url}/inbox (not delivered)`}
+             Email: ${mailer ? `${resendEndpoint ? new URL(resendEndpoint).host : 'Resend'} (from ${mailFrom})` : `dev inbox at ${server.url}/inbox (not delivered)`}
     Mail templates: ${Object.keys(emailTemplates).length ? Object.keys(emailTemplates).join(', ') : 'built-in defaults'}
           Site URL: ${siteUrl}
     Redirects to: ${uriAllowList.length ? uriAllowList.join(', ') : 'the site URL origin only'}

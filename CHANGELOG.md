@@ -4,6 +4,16 @@ All notable changes to tinbase are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow semver
 (pre-1.0, minor bumps may include breaking changes).
 
+## [Unreleased]
+
+### Added
+- **`TINBASE_RESEND_ENDPOINT`** points the Resend transport at a Resend-compatible API other than
+  Resend itself. A platform running many tenants can then send through its own gateway: the
+  gateway holds the real provider credential, so no tenant's container does, and it can attribute
+  and cap each tenant's sending — which one shared credential going straight to the provider
+  cannot. The payload is unchanged, and an invalid URL fails at startup rather than looking like
+  mail that never arrives.
+
 ## [0.15.4]
 
 ### Added
