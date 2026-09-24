@@ -4,6 +4,38 @@ All notable changes to tinbase are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow semver
 (pre-1.0, minor bumps may include breaking changes).
 
+## [Unreleased]
+
+### Added
+- **`[auth.email.smtp]` — a project sends its own email.** Until now the only way to send real
+  mail was the Resend transport, which made our choice of provider everyone else's problem: to
+  send at all you had to open an account with the one vendor we happened to implement. SMTP is a
+  protocol rather than a vendor, so one implementation covers SES, Postmark, Mailgun, Resend or a
+  mail server you run yourself — and the block uses GoTrue's key names (`host`, `port`, `user`,
+  `pass`, `admin_email`, `sender_name`), so a project's configuration is portable between tinbase
+  and Supabase. `pass` goes through the parser's existing `env(VAR)` substitution, so the secret
+  never sits in the committed file. `nodemailer` is an optional dependency, imported lazily: the
+  browser build must not pull `node:net`/`node:tls`.
+
+  The same settings are also read from the environment as `TINBASE_SMTP_HOST` / `_PORT` /
+  `_USER` / `_PASS` / `_ADMIN_EMAIL` / `_SENDER_NAME`, mirroring GoTrue's `GOTRUE_SMTP_*` so an
+  operator moving between the two configures the same things by the same names. A deployment
+  configures containers through the environment, not by writing into each project's committed
+  files — and a platform that edited a tenant's `config.toml` would be editing something the
+  tenant owns.
+
+  Precedence is the project's own block, then the environment, then the dev
+  inbox. A project's block wins because it is the more specific statement of intent — and because
+  sending as the project's own address is only legitimate when the project's own credentials
+  carry it.
+
+- **`TINBASE_RESEND_ENDPOINT`** points the Resend transport at a Resend-compatible API other than
+  Resend itself. A platform running many tenants can then send through its own gateway: the
+  gateway holds the real provider credential, so no tenant's container does, and it can attribute
+  and cap each tenant's sending — which one shared credential going straight to the provider
+  cannot. The payload is unchanged, and an invalid URL fails at startup rather than looking like
+  mail that never arrives.
+
 ## [0.15.4]
 
 ### Added

@@ -17,6 +17,8 @@ import type { DbEngine } from './db/engine.js'
 import { readServerLock, removeServerLock, writeServerLock, type ServerLock } from './node/server-lock.js'
 import { FsStorageDriver } from './node/fs-driver.js'
 import { ResendMailer } from './auth/resend.js'
+import { SmtpMailer } from './node/smtp-mailer.js'
+import type { Mailer } from './types.js'
 import { loadProjectConfig } from './node/load-config.js'
 import { loadFunctions, loadFunctionEnv } from './node/load-functions.js'
 import { loadSupabaseProject } from './node/project.js'
@@ -438,6 +440,20 @@ Email (env):
   TINBASE_RESEND_API_KEY  deliver auth emails through Resend; without it they land
                           in the dev inbox at /inbox and are never sent
   TINBASE_MAIL_FROM       sender for Resend, e.g. "My App <noreply@example.com>"
+  TINBASE_RESEND_ENDPOINT send through a Resend-compatible gateway instead of
+                          api.resend.com (a platform gateway that holds the real
+                          key and meters each tenant)
+
+SMTP (env, mirroring GOTRUE_SMTP_*):
+  TINBASE_SMTP_HOST         mail server to send through - any SMTP provider
+  TINBASE_SMTP_PORT         default 587
+  TINBASE_SMTP_USER
+  TINBASE_SMTP_PASS
+  TINBASE_SMTP_ADMIN_EMAIL  address mail is sent from
+  TINBASE_SMTP_SENDER_NAME  display name beside it
+
+A project overrides all of the above with [auth.email.smtp] in
+supabase/config.toml (host, port, user, pass, admin_email, sender_name).
   TINBASE_SITE_URL        public URL emailed links are built on (overrides
                           config.toml auth.site_url and the bound address)
   TINBASE_URI_ALLOW_LIST  comma-separated redirect targets to allow in addition
@@ -672,16 +688,87 @@ async function main(): Promise<void> {
   // which one is active. The key alone is not enough: Resend needs a verified
   // sender, so a missing/invalid TINBASE_MAIL_FROM is a startup error rather
   // than a silently dropped email later.
+  // Who sends this project's auth email, in precedence order:
+  //
+  //   1. the project's own [auth.email.smtp]  - it asked to send its own mail
+  //   2. the deployment's transport (env)     - a platform sending for its tenants
+  //   3. neither                              - the dev inbox, delivered nowhere
+  //
+  // A project's own block wins because it is the more specific statement of
+  // intent, and because the addresses differ: sending as the project's address
+  // is only legitimate when the project's own credentials carry it. On the
+  // platform path the sender stays whatever the deployment set, so a tenant
+  // cannot mail as someone else on the deployment's reputation.
+  // SMTP from two places, project first. The names mirror GoTrue's
+  // (GOTRUE_SMTP_* -> TINBASE_SMTP_*) so an operator moving between the two
+  // configures the same things by the same names.
+  //
+  // Env exists because a deployment configures containers through the
+  // environment, not by writing into each project's committed files - and a
+  // platform that edited a tenant's config.toml would be editing something the
+  // tenant owns. config.toml still wins: a project asking to send its own mail
+  // is the more specific instruction.
+  const envSmtpHost = process.env.TINBASE_SMTP_HOST
+  const smtpCfg = cfg.auth.smtp?.host
+    ? cfg.auth.smtp
+    : envSmtpHost
+      ? {
+          enabled: true,
+          host: envSmtpHost,
+          port: process.env.TINBASE_SMTP_PORT ? parseInt(process.env.TINBASE_SMTP_PORT, 10) : 587,
+          user: process.env.TINBASE_SMTP_USER,
+          pass: process.env.TINBASE_SMTP_PASS,
+          adminEmail: process.env.TINBASE_SMTP_ADMIN_EMAIL,
+          senderName: process.env.TINBASE_SMTP_SENDER_NAME,
+        }
+      : undefined
+  const useProjectSmtp = !!smtpCfg?.host && smtpCfg.enabled !== false
   const resendApiKey = process.env.TINBASE_RESEND_API_KEY
   const mailFrom = process.env.TINBASE_MAIL_FROM
-  let mailer: ResendMailer | undefined
-  if (resendApiKey) {
+  const resendEndpoint = process.env.TINBASE_RESEND_ENDPOINT || undefined
+  let mailer: Mailer | undefined
+  let mailDescription = ''
+  if (useProjectSmtp) {
+    try {
+      const m = new SmtpMailer({
+        host: smtpCfg!.host!,
+        port: smtpCfg!.port ?? 587,
+        user: smtpCfg!.user,
+        pass: smtpCfg!.pass,
+        adminEmail: smtpCfg!.adminEmail ?? '',
+        senderName: smtpCfg!.senderName,
+        secure: smtpCfg!.secure,
+      })
+      mailer = m
+      mailDescription = `SMTP ${smtpCfg!.host}:${smtpCfg!.port ?? 587} (from ${m.from})${cfg.auth.smtp?.host ? '' : ' [env]'}`
+    } catch (e) {
+      console.error(`auth.email.smtp: ${e instanceof Error ? e.message : String(e)}`)
+      process.exit(1)
+    }
+  } else if (resendApiKey) {
     if (!mailFrom) {
       console.error('TINBASE_RESEND_API_KEY is set but TINBASE_MAIL_FROM is not (e.g. "My App <noreply@example.com>")')
       process.exit(1)
     }
+    // Fail here rather than on the first email: a typo in the gateway URL would
+    // otherwise look like mail simply never arriving.
+    if (resendEndpoint !== undefined) {
+      try {
+        new URL(resendEndpoint)
+      } catch {
+        console.error(`TINBASE_RESEND_ENDPOINT is not a valid URL: ${resendEndpoint}`)
+        process.exit(1)
+      }
+    }
     try {
-      mailer = new ResendMailer({ apiKey: resendApiKey, from: mailFrom })
+      // TINBASE_RESEND_ENDPOINT points the transport at a Resend-compatible API
+      // other than Resend itself. A platform running many tenants uses this to
+      // send through its own gateway: the gateway holds the real provider
+      // credential, so no tenant's container does, and it can attribute and cap
+      // each tenant's sending - which a shared credential going straight to the
+      // provider cannot. The payload shape is unchanged either way.
+      mailer = new ResendMailer({ apiKey: resendApiKey, from: mailFrom, endpoint: resendEndpoint })
+      mailDescription = `${resendEndpoint ? new URL(resendEndpoint).host : 'Resend'} (from ${mailFrom})`
     } catch (e) {
       console.error(e instanceof Error ? e.message : String(e))
       process.exit(1)
@@ -787,7 +874,7 @@ async function main(): Promise<void> {
 
            API URL: ${server.url}
           Admin UI: ${server.url}/_/
-             Email: ${mailer ? `Resend (from ${mailFrom})` : `dev inbox at ${server.url}/inbox (not delivered)`}
+             Email: ${mailer ? mailDescription : `dev inbox at ${server.url}/inbox (not delivered)`}
     Mail templates: ${Object.keys(emailTemplates).length ? Object.keys(emailTemplates).join(', ') : 'built-in defaults'}
           Site URL: ${siteUrl}
     Redirects to: ${uriAllowList.length ? uriAllowList.join(', ') : 'the site URL origin only'}
