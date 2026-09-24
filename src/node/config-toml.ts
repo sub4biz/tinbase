@@ -5,21 +5,22 @@
  *
  *   - `[section]` and dotted `[section.sub.name]` table headers
  *   - `key = value` scalars (string, bool, integer)
- *   - single-line string arrays: `key = ["a", "b"]`
+ *   - string arrays, on one line or spread across several:
+ *     `key = ["a", "b"]`, or the same entries one per line
  *   - `#` line and inline comments
  *   - `env(VAR)` substitution against process.env (or a provided env)
  *
- * It does NOT handle inline tables (`{ a = 1 }`), multi-line arrays, or dotted
- * keys inside a table body - none of which config.toml uses for the settings we
- * read. Each loader (auth, api, storage, functions, oauth) reads from the one
- * parsed tree instead of re-scanning the file.
+ * It does NOT handle inline tables (`{ a = 1 }`) or dotted keys inside a table
+ * body - neither of which config.toml uses for the settings we read. Each
+ * loader (auth, api, storage, functions, oauth) reads from the one parsed tree
+ * instead of re-scanning the file.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /** A parsed table: its scalar/array values plus nested child tables. */
 export interface ConfigTable {
-  /** scalar and single-line-array values declared directly under this table, by key */
+  /** scalar and array values declared directly under this table, by key */
   values: Map<string, string | string[]>
   /** nested child tables, by their (single, undotted) segment name */
   children: Map<string, ConfigTable>
@@ -44,8 +45,9 @@ export function loadConfigToml(projectDir: string, env: NodeJS.ProcessEnv = proc
 export function parseConfigToml(text: string, env: NodeJS.ProcessEnv = process.env): ConfigTable {
   const root = emptyTable()
   let current = root
-  for (const rawLine of text.split('\n')) {
-    const line = stripComment(rawLine).trim()
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripComment(lines[i]).trim()
     if (!line) continue
     const header = line.match(/^\[([^\]]+)\]$/)
     if (header) {
@@ -54,10 +56,48 @@ export function parseConfigToml(text: string, env: NodeJS.ProcessEnv = process.e
     }
     const kv = line.match(/^([A-Za-z0-9_]+)\s*=\s*(.+)$/)
     if (!kv) continue
-    const value = parseValue(kv[2].trim(), env)
+    let raw = kv[2].trim()
+    // An array may be spread over several lines, which is how Supabase itself
+    // writes a long one. Join them before parsing so the value below sees a
+    // single `["a", "b"]` however the file was formatted. Read only as far as
+    // the brackets balance: a file that never closes one is malformed, and
+    // swallowing the rest of it would lose every setting that follows.
+    if (raw.startsWith('[') && bracketDepth(raw) > 0) {
+      const parts = [raw]
+      let j = i
+      while (++j < lines.length) {
+        const next = stripComment(lines[j]).trim()
+        if (/^\[([^\]]+)\]$/.test(next)) break // a table header: the array was never closed
+        parts.push(next)
+        if (bracketDepth(parts.join(' ')) === 0) {
+          raw = parts.join(' ')
+          i = j
+          break
+        }
+      }
+    }
+    const value = parseValue(raw, env)
     if (value !== undefined) current.values.set(kv[1], value)
   }
   return root
+}
+
+/** Net `[` minus `]` outside quoted strings, so brackets inside a value don't count. */
+function bracketDepth(s: string): number {
+  let depth = 0
+  let quote: string | null = null
+  for (const c of s) {
+    if (quote) {
+      if (c === quote) quote = null
+    } else if (c === '"' || c === "'") {
+      quote = c
+    } else if (c === '[') {
+      depth++
+    } else if (c === ']') {
+      depth--
+    }
+  }
+  return depth
 }
 
 /** Walk/create the table at the given dotted path. */
@@ -90,7 +130,7 @@ function stripComment(line: string): string {
   return line
 }
 
-/** Parse a scalar or single-line array value, resolving env() and stripping quotes. */
+/** Parse a scalar or array value (already joined to one line), resolving env() and stripping quotes. */
 function parseValue(raw: string, env: NodeJS.ProcessEnv): string | string[] | undefined {
   if (raw.startsWith('[') && raw.endsWith(']')) {
     const inner = raw.slice(1, -1).trim()
