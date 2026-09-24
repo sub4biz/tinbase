@@ -95,6 +95,13 @@ export interface BackendConfig {
    * without an override keep the built-in default.
    */
   emailTemplates?: import('./auth/templates.js').EmailTemplates
+  /**
+   * `[auth.hook.send_email]`: an endpoint that receives the token data and
+   * composes and sends the mail itself, replacing both rendering and transport.
+   */
+  sendEmailHook?: import('./auth/send-email-hook.js').SendEmailHookConfig
+  /** Injectable fetch for the hook (tests capture the request). */
+  hookFetch?: typeof fetch
   /** OAuth providers, e.g. { google: { clientId, clientSecret } }. Served at /auth/v1/authorize. */
   oauthProviders?: Record<string, import('./auth/oauth.js').OAuthProviderConfig>
   /** Injectable fetch for OAuth provider calls (tests point this at a mock provider). */

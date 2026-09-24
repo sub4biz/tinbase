@@ -35,6 +35,15 @@ All notable changes to tinbase are documented here. The format follows
   and cap each tenant's sending — which one shared credential going straight to the provider
   cannot. The payload is unchanged, and an invalid URL fails at startup rather than looking like
   mail that never arrives.
+- **`[auth.hook.send_email]` — hand the email to an endpoint instead of sending it.** The
+  endpoint receives the token, its hash, the redirect target and which action it is, then
+  composes and sends the mail itself, so it owns the wording, the format and the provider. This
+  intercepts earlier than a transport: a transport receives a message we have already written,
+  the hook receives the material. Payload and signing are GoTrue's — Standard Webhooks headers
+  (`webhook-id`, `webhook-timestamp`, `webhook-signature`, HMAC-SHA256 over `id.timestamp.body`)
+  and the `v1,whsec_…` secret format — so an endpoint written against Supabase works here
+  unchanged. An endpoint that refuses the request fails the caller's request rather than
+  reporting a success for mail that was never sent.
 
 ## [0.15.4]
 
