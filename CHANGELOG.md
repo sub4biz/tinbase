@@ -4,7 +4,7 @@ All notable changes to tinbase are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versions follow semver
 (pre-1.0, minor bumps may include breaking changes).
 
-## [Unreleased]
+## [0.16.0]
 
 ### Added
 - **`[auth.email.smtp]` — a project sends its own email.** Until now the only way to send real
