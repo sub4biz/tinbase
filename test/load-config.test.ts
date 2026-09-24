@@ -84,6 +84,42 @@ inactivity_timeout = "30m"
     expect(auth.sessionInactivitySeconds).toBe(30 * 60)
   })
 
+  it('reads an array written across several lines, the way Supabase writes a long one', () => {
+    const dir = project(`
+[auth]
+site_url = "http://localhost:3000"
+additional_redirect_urls = [
+  "myapp://reset-password",
+  "exp://**",
+]
+jwt_expiry = 7200
+
+[auth.email]
+enable_confirmations = false
+`)
+    const auth = loadProjectConfig(dir).auth
+    expect(auth.uriAllowList).toEqual(['myapp://reset-password', 'exp://**'])
+    // Keys on either side of the multi-line array still land, in their own table.
+    expect(auth.jwtExpiry).toBe(7200)
+    expect(auth.settings.autoconfirm).toBe(true)
+  })
+
+  it('keeps reading the file when an array is never closed', () => {
+    const dir = project(`
+[auth]
+additional_redirect_urls = [
+  "myapp://cb"
+
+[auth.sessions]
+timebox = "24h"
+`)
+    const auth = loadProjectConfig(dir).auth
+    // The malformed array yields nothing, but the table after it is still parsed -
+    // consuming to end-of-file would silently drop every setting below it.
+    expect(auth.uriAllowList ?? []).toEqual([])
+    expect(auth.sessionTimeboxSeconds).toBe(24 * 3600)
+  })
+
   it('maps [auth.rate_limit] to limiter rules', () => {
     const dir = project(`
 [auth.rate_limit]
