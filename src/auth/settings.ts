@@ -26,6 +26,16 @@ export interface AuthSettings {
   otpLength: number
   /** OTP / magic-link lifetime in seconds (auth.email.otp_expiry). */
   otpExpirySeconds: number
+  /**
+   * Minimum seconds between auth emails to the same address
+   * (config.toml `[auth.email] max_frequency`, GoTrue's SMTP_MAX_FREQUENCY).
+   *
+   * The per-client rate limit does not cover this: it is keyed by caller, so
+   * rotating addresses defeats it, and it says nothing about how often one
+   * person's inbox can be made to receive mail. This is keyed by recipient, so
+   * it caps what any one mailbox can be subjected to no matter who asks.
+   */
+  maxEmailFrequencySeconds: number
   /** Max MFA factors a user may enroll (auth.mfa.max_enrolled_factors). */
   maxEnrolledFactors: number
   /** Allow TOTP enrollment (auth.mfa.totp.enroll_enabled). */
@@ -43,6 +53,7 @@ export const DEFAULT_AUTH_SETTINGS: AuthSettings = {
   disabledProviders: [],
   otpLength: 6,
   otpExpirySeconds: 3600,
+  maxEmailFrequencySeconds: 60,
   maxEnrolledFactors: 10,
   totpEnrollEnabled: true,
   totpVerifyEnabled: true,
@@ -65,6 +76,17 @@ function sanitize(raw: Record<string, unknown>): AuthSettings {
   }
   if (typeof raw.otpExpirySeconds === 'number' && Number.isFinite(raw.otpExpirySeconds) && raw.otpExpirySeconds > 0) {
     s.otpExpirySeconds = Math.floor(raw.otpExpirySeconds)
+  }
+  // >= 0, not > 0: zero is how the limit is turned off, and a value that is
+  // merely falsy must not be mistaken for one that was never set.
+  if (
+    typeof raw.maxEmailFrequencySeconds === 'number' &&
+    Number.isFinite(raw.maxEmailFrequencySeconds) &&
+    raw.maxEmailFrequencySeconds >= 0
+  ) {
+    // Capped: a mistyped window that locks a mailbox out of password reset for
+    // a day is worse than one that is slightly too short.
+    s.maxEmailFrequencySeconds = Math.min(3600, Math.floor(raw.maxEmailFrequencySeconds))
   }
   if (typeof raw.maxEnrolledFactors === 'number' && Number.isFinite(raw.maxEnrolledFactors) && raw.maxEnrolledFactors > 0) {
     s.maxEnrolledFactors = Math.floor(raw.maxEnrolledFactors)

@@ -277,3 +277,35 @@ admin_email = "noreply@acme.com"
     expect(loadProjectConfig(project(`[auth]\nenabled = true\n`)).auth.smtp).toBeUndefined()
   })
 })
+
+describe('loadProjectConfig — [auth.email] max_frequency', () => {
+  it('accepts a duration string, as Supabase writes it', () => {
+    expect(loadProjectConfig(project(`[auth.email]\nmax_frequency = "60s"\n`)).auth.settings.maxEmailFrequencySeconds).toBe(60)
+    expect(loadProjectConfig(project(`[auth.email]\nmax_frequency = "1m0s"\n`)).auth.settings.maxEmailFrequencySeconds).toBe(60)
+  })
+
+  it('accepts a bare number of seconds', () => {
+    expect(loadProjectConfig(project(`[auth.email]\nmax_frequency = 30\n`)).auth.settings.maxEmailFrequencySeconds).toBe(30)
+  })
+
+  it('leaves the default in place when absent', () => {
+    expect(loadProjectConfig(project(`[auth]\nenabled = true\n`)).auth.settings.maxEmailFrequencySeconds).toBeUndefined()
+  })
+})
+
+describe('getDurationSeconds — compound Go durations', () => {
+  it('reads every unit, not just the first', () => {
+    // What Supabase writes. Reading only the leading unit turned "24h0m0s"
+    // into 24 seconds — a session timebox a thousand times shorter than asked.
+    const cfg = loadProjectConfig(
+      project(`[auth.sessions]\ntimebox = "24h0m0s"\ninactivity_timeout = "1h30m0s"\n`)
+    ).auth
+    expect(cfg.sessionTimeboxSeconds).toBe(86400)
+    expect(cfg.sessionInactivitySeconds).toBe(5400)
+  })
+
+  it('still reads the single-unit form', () => {
+    const cfg = loadProjectConfig(project(`[auth.sessions]\ntimebox = "24h"\n`)).auth
+    expect(cfg.sessionTimeboxSeconds).toBe(86400)
+  })
+})

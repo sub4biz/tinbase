@@ -191,6 +191,35 @@ export class AuthHandler {
     )
   }
 
+  /**
+   * Enforce `max_frequency`: refuse a second auth email to the same address
+   * within the configured window (GoTrue's `over_email_send_rate_limit`).
+   *
+   * Keyed by recipient, not by caller, and checked before the account is looked
+   * up. Both matter: keying by caller lets someone rotate addresses and keep
+   * mailing one victim, and checking after the lookup would answer differently
+   * for an address that exists than for one that does not - handing back the
+   * account enumeration that answering 200 for unknown addresses exists to
+   * prevent.
+   */
+  private limitEmailFrequency(email: string): Response | null {
+    const seconds = this.settings.maxEmailFrequencySeconds
+    if (!this.rateLimiter || !seconds || seconds <= 0) return null
+    const retryAfter = this.rateLimiter.check('email_frequency', email.toLowerCase().trim(), Date.now(), {
+      limit: 1,
+      windowMs: seconds * 1000,
+    })
+    if (retryAfter === null) return null
+    return new Response(
+      JSON.stringify({
+        code: 429,
+        error_code: 'over_email_send_rate_limit',
+        msg: `For security purposes, you can only request this after ${retryAfter} seconds.`,
+      }),
+      { status: 429, headers: { 'content-type': 'application/json; charset=utf-8', 'retry-after': String(retryAfter) } }
+    )
+  }
+
   /** Stop background timers (rate-limiter sweep). Called on backend close. */
   stop(): void {
     this.rateLimiter?.stop()
@@ -635,6 +664,8 @@ export class AuthHandler {
       code_challenge_method?: string
     }
     if (!body.email) return authError(400, 'validation_failed', 'email is required')
+    const tooSoon = this.limitEmailFrequency(body.email)
+    if (tooSoon) return tooSoon
     return this.issueToken(body.email, 'otp', body.create_user !== false, {
       redirectTo: url.searchParams.get('redirect_to'),
       ...AuthHandler.pkceFrom(body),
@@ -648,6 +679,8 @@ export class AuthHandler {
       code_challenge_method?: string
     }
     if (!body.email) return authError(400, 'validation_failed', 'email is required')
+    const tooSoon = this.limitEmailFrequency(body.email)
+    if (tooSoon) return tooSoon
     // GoTrue answers 200 for an address it has never seen, so the response
     // can't be used to enumerate which emails have accounts. supabase-js apps
     // rely on this to show "check your inbox" unconditionally.

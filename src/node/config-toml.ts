@@ -152,20 +152,29 @@ export function getStringArray(table: ConfigTable | undefined, key: string): str
 }
 
 /**
- * Parse a Supabase duration string ("1m", "24h", "10s", "50m") to seconds.
+ * Parse a Go duration to seconds: a single unit ("1m", "24h", "10s") or the
+ * compound form Supabase itself writes ("1m0s", "24h0m0s").
+ *
+ * The compound form matters - it is what lands in the file when Supabase
+ * generates it - and reading only the first unit turns "1m0s" into 1 second
+ * and "24h0m0s" into 24, quietly shortening a window by orders of magnitude.
+ *
  * Returns undefined if absent or malformed.
  */
 export function getDurationSeconds(table: ConfigTable | undefined, key: string): number | undefined {
   const v = table?.values.get(key)
   if (typeof v !== 'string') return undefined
-  const m = v.trim().match(/^(\d+)\s*(s|m|h)$/i)
-  if (!m) {
-    const n = parseInt(v, 10)
-    return Number.isFinite(n) ? n : undefined
+  const text = v.trim()
+  if (/^(\d+\s*[hms]\s*)+$/i.test(text)) {
+    let total = 0
+    for (const [, digits, unit] of text.matchAll(/(\d+)\s*([hms])/gi)) {
+      const n = parseInt(digits, 10)
+      total += unit.toLowerCase() === 'h' ? n * 3600 : unit.toLowerCase() === 'm' ? n * 60 : n
+    }
+    return total
   }
-  const n = parseInt(m[1], 10)
-  const unit = m[2].toLowerCase()
-  return unit === 'h' ? n * 3600 : unit === 'm' ? n * 60 : n
+  const n = parseInt(text, 10)
+  return Number.isFinite(n) ? n : undefined
 }
 
 /**

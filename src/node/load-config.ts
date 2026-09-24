@@ -228,6 +228,9 @@ function readAuthSettings(root: ConfigTable): Partial<AuthSettings> {
   if (otpLength !== undefined) out.otpLength = otpLength
   const otpExpiry = getInt(email, 'otp_expiry')
   if (otpExpiry !== undefined) out.otpExpirySeconds = otpExpiry
+  // Supabase writes this as a duration ("60s", "1m0s"); accept a bare number too.
+  const maxFrequency = getDurationSeconds(email, 'max_frequency') ?? getInt(email, 'max_frequency')
+  if (maxFrequency !== undefined) out.maxEmailFrequencySeconds = maxFrequency
 
   const maxFactors = getInt(mfa, 'max_enrolled_factors')
   if (maxFactors !== undefined) out.maxEnrolledFactors = maxFactors

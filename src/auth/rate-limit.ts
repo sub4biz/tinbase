@@ -45,8 +45,13 @@ export class RateLimiter {
    * Returns `null` when allowed, or the seconds until the window frees up when
    * the limit is exceeded.
    */
-  check(action: string, key: string, now: number = Date.now()): number | null {
-    const rule = this.rules[action]
+  /**
+   * `override` supplies the rule inline, for a limit whose window is a runtime
+   * setting rather than a fixed policy (e.g. the per-recipient email
+   * frequency, which a project can change without restarting).
+   */
+  check(action: string, key: string, now: number = Date.now(), override?: RateLimitRule): number | null {
+    const rule = override ?? this.rules[action]
     if (!rule) return null
     const bucketKey = `${action}:${key}`
     const cutoff = now - rule.windowMs
