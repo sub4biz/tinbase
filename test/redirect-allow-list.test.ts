@@ -117,4 +117,79 @@ describe('emailed recovery link honours the allowlist', () => {
       await backend.close()
     }
   })
+
+  it('builds the link on the API URL and falls back to the app, when the two differ', async () => {
+    const outbox: MailMessage[] = []
+    const backend = await createBackend({
+      mailer: { send: async (m) => void outbox.push(m) },
+      // The app and this server are different hosts, which is the normal shape
+      // once a platform routes them separately.
+      siteUrl: 'https://abc-web.example.dev',
+      apiExternalUrl: 'https://abc-db.example.dev',
+      uriAllowList: [],
+      host: '0.0.0.0',
+      jwtSecret: 'test-secret-at-least-32-characters-long',
+    })
+    try {
+      await backend.fetch(
+        new Request(`https://abc-db.example.dev/auth/v1/signup`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', apikey: backend.anonKey },
+          body: JSON.stringify({ email: 'split@example.com', password: 'password123' }),
+        })
+      )
+      await backend.fetch(
+        new Request(
+          `https://abc-db.example.dev/auth/v1/recover?redirect_to=${encodeURIComponent('myapp://cb')}`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', apikey: backend.anonKey },
+            body: JSON.stringify({ email: 'split@example.com' }),
+          }
+        )
+      )
+      const link = outbox[outbox.length - 1].text.match(/(https?:\S+verify\S+)/)?.[1]
+      // The link has to come back to this server - the app cannot verify a token.
+      expect(link).toContain('https://abc-db.example.dev/auth/v1/verify')
+
+      // myapp:// is not allowed, so it falls back - to the app, not to this
+      // server's root, which is the whole point of separating the two.
+      const res = await backend.fetch(new Request(link!, { redirect: 'manual' }))
+      expect(res.status).toBe(303)
+      expect(res.headers.get('location')).toContain('https://abc-web.example.dev#access_token=')
+    } finally {
+      await backend.close()
+    }
+  })
+
+  it('defaults the API URL to the site URL, so an unsplit deployment is unchanged', async () => {
+    const outbox: MailMessage[] = []
+    const backend = await createBackend({
+      mailer: { send: async (m) => void outbox.push(m) },
+      siteUrl: 'https://abc-db.example.dev',
+      uriAllowList: [],
+      host: '0.0.0.0',
+      jwtSecret: 'test-secret-at-least-32-characters-long',
+    })
+    try {
+      await backend.fetch(
+        new Request(`https://abc-db.example.dev/auth/v1/signup`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', apikey: backend.anonKey },
+          body: JSON.stringify({ email: 'unsplit@example.com', password: 'password123' }),
+        })
+      )
+      await backend.fetch(
+        new Request(`https://abc-db.example.dev/auth/v1/recover`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', apikey: backend.anonKey },
+          body: JSON.stringify({ email: 'unsplit@example.com' }),
+        })
+      )
+      const link = outbox[outbox.length - 1].text.match(/(https?:\S+verify\S+)/)?.[1]
+      expect(link).toContain('https://abc-db.example.dev/auth/v1/verify')
+    } finally {
+      await backend.close()
+    }
+  })
 })

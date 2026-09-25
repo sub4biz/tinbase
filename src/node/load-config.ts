@@ -44,8 +44,10 @@ export interface AuthConfig {
   enabled?: boolean
   /** runtime-toggleable settings, layered under the live auth.config table */
   settings: Partial<AuthSettings>
-  /** [auth].site_url */
+  /** [auth].site_url - where the app lives; the default redirect */
   siteUrl?: string
+  /** [auth].api_external_url - where this server answers; emailed links are built on it */
+  apiExternalUrl?: string
   /** [auth].jwt_expiry, seconds */
   jwtExpiry?: number
   /** [auth].additional_redirect_urls */
@@ -134,6 +136,8 @@ function readAuth(root: ConfigTable, env: NodeJS.ProcessEnv): AuthConfig {
   if (enabled !== undefined) out.enabled = enabled
   const siteUrl = getString(auth, 'site_url')
   if (siteUrl !== undefined) out.siteUrl = siteUrl
+  const apiExternalUrl = getString(auth, 'api_external_url')
+  if (apiExternalUrl !== undefined) out.apiExternalUrl = apiExternalUrl
   const jwtExpiry = getInt(auth, 'jwt_expiry')
   if (jwtExpiry !== undefined && jwtExpiry > 0) out.jwtExpiry = jwtExpiry
   const redirects = getStringArray(auth, 'additional_redirect_urls')

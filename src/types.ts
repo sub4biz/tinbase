@@ -59,8 +59,14 @@ export interface BackendConfig {
    * always set a dedicated key in production.
    */
   vaultKey?: string
-  /** External URL of this backend, used as JWT issuer. */
+  /** Where the application lives: the default redirect for emailed links. */
   siteUrl?: string
+  /**
+   * Where this backend answers - emailed links are built on it and it is the
+   * JWT issuer. Defaults to `siteUrl`, which is what a deployment serving both
+   * from one address is already using.
+   */
+  apiExternalUrl?: string
   /**
    * Host the server is bound to. Used only to decide whether the backend is
    * network-exposed: a non-loopback host turns the default JWT secret and the

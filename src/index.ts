@@ -141,6 +141,9 @@ const CORS_HEADERS: Record<string, string> = {
 export async function createBackend(config: BackendConfig = {}): Promise<TinbaseBackend> {
   const jwtSecret = config.jwtSecret ?? DEFAULT_JWT_SECRET
   const siteUrl = config.siteUrl ?? 'http://localhost:54321'
+  // Where this backend answers, as opposed to where the app lives. Same value
+  // unless a deployment separates them.
+  const apiExternalUrl = config.apiExternalUrl ?? siteUrl
   const jwtExpiry = config.jwtExpiry ?? 3600
 
   // capture server logs for the Studio "Logs" pane, still forwarding to the
@@ -245,6 +248,7 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
   const auth = new AuthHandler(db, {
     jwtSecret,
     siteUrl,
+    apiExternalUrl,
     jwtExpiry,
     sessionTimeboxSeconds: config.sessionTimeboxSeconds,
     mailer,

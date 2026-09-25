@@ -107,6 +107,8 @@ export class OAuthService {
   constructor(
     private db: Database,
     private siteUrl: string,
+    /** Where this server answers; the provider redirects back here, not to the app. */
+    private apiExternalUrl: string,
     configs: Record<string, OAuthProviderConfig>,
     private fetchImpl: typeof fetch = fetch,
     private uriAllowList: string[] = [],
@@ -123,7 +125,10 @@ export class OAuthService {
   }
 
   private callbackUrl(): string {
-    return `${this.siteUrl}/auth/v1/callback`
+    // The provider sends the user back to this server to exchange the code -
+    // the app has no endpoint for it. Error and success redirects below still
+    // go to siteUrl, which is where the user belongs once the flow is over.
+    return `${this.apiExternalUrl}/auth/v1/callback`
   }
 
   /** GET /authorize - persist state, redirect to the provider. */
