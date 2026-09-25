@@ -19,8 +19,29 @@ import { generateTotpSecret, otpauthUri, verifyTotp } from './totp.js'
 export interface AuthConfig {
   /** HS256 secret used to sign and verify access tokens */
   jwtSecret: string
-  /** public base URL of this instance; used as issuer and default redirect target */
+  /**
+   * Where the *application* lives. The default redirect when a link carries no
+   * `redirect_to` or one the allowlist refuses, and what `{{ .SiteURL }}`
+   * interpolates to in an email template.
+   *
+   * This is GoTrue's `SITE_URL`, and it is not where this server answers - see
+   * {@link apiExternalUrl}.
+   */
   siteUrl: string
+  /**
+   * Where *this server* answers, as a mail client can reach it. Emailed links
+   * are built on it and it is the token issuer.
+   *
+   * Separate from {@link siteUrl} because the two are different machines: a
+   * link has to come back here to be verified, while a user who finishes the
+   * flow belongs on the app. Collapsing them forces a choice between links
+   * that resolve and a redirect that lands somewhere useful - set to the API,
+   * every fallback dumps the user on this server's root; set to the app, no
+   * emailed link works at all.
+   *
+   * Defaults to {@link siteUrl}, which is the pre-0.17 behaviour.
+   */
+  apiExternalUrl?: string
   /** Access-token lifetime in seconds. */
   jwtExpiry: number
   /** Force sign-out after this many seconds (config.toml auth.sessions.timebox). Caps session lifetime. */
@@ -176,6 +197,7 @@ export class AuthHandler {
     this.oauth = new OAuthService(
       db,
       config.siteUrl,
+      config.apiExternalUrl || config.siteUrl,
       config.oauthProviders ?? {},
       config.oauthFetch ?? fetch,
       config.uriAllowList,
@@ -183,6 +205,15 @@ export class AuthHandler {
     )
     this.settings = config.settings ?? { ...DEFAULT_AUTH_SETTINGS }
     this.rateLimiter = config.rateLimiter === undefined ? new RateLimiter() : config.rateLimiter
+  }
+
+  /**
+   * Where this server answers: emailed links come back here, and tokens are
+   * issued by it. Falls back to the site URL, which is what a deployment that
+   * has not separated the two is already using for both.
+   */
+  private get apiUrl(): string {
+    return this.config.apiExternalUrl || this.config.siteUrl
   }
 
   /**
@@ -602,7 +633,7 @@ export class AuthHandler {
     const { code, linkToken } = minted
     const normalized = email.toLowerCase().trim()
     const kind = tokenType === 'otp' ? 'magiclink' : tokenType
-    let link = `${this.config.siteUrl}/auth/v1/verify?token=${linkToken}&type=${kind}`
+    let link = `${this.apiUrl}/auth/v1/verify?token=${linkToken}&type=${kind}`
     const redirectTo = resolveRedirect(
       opts.redirectTo,
       this.config.siteUrl,
@@ -1007,7 +1038,7 @@ export class AuthHandler {
       this.config.enforceRedirectAllowList
     )
     const actionLink =
-      `${this.config.siteUrl}/auth/v1/verify?token=${linkToken}&type=${type}` +
+      `${this.apiUrl}/auth/v1/verify?token=${linkToken}&type=${type}` +
       `&redirect_to=${encodeURIComponent(redirectTo)}`
 
     await this.audit('generate_link', { actorId: user.id, actorEmail: user.email, traits: { type } })
@@ -1393,7 +1424,7 @@ export class AuthHandler {
     // moment the client refreshed.
     const sessionId = opts?.sessionId ?? crypto.randomUUID()
     const claims: JwtClaims = {
-      iss: `${this.config.siteUrl}/auth/v1`,
+      iss: `${this.apiUrl}/auth/v1`,
       sub: user.id,
       aud: user.aud ?? 'authenticated',
       exp: expiresAt,

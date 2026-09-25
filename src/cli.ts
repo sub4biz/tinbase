@@ -454,8 +454,14 @@ SMTP (env, mirroring GOTRUE_SMTP_*):
 
 A project overrides all of the above with [auth.email.smtp] in
 supabase/config.toml (host, port, user, pass, admin_email, sender_name).
-  TINBASE_SITE_URL        public URL emailed links are built on (overrides
-                          config.toml auth.site_url and the bound address)
+  TINBASE_SITE_URL        public URL of the APP: the default redirect for
+                          emailed links (overrides config.toml auth.site_url
+                          and the bound address)
+  TINBASE_API_EXTERNAL_URL
+                          public URL of THIS SERVER, which emailed links are
+                          built on and tokens are issued by. Defaults to the
+                          site URL. GOTRUE_API_EXTERNAL_URL and API_EXTERNAL_URL
+                          are accepted too.
   TINBASE_URI_ALLOW_LIST  comma-separated redirect targets to allow in addition
                           to config.toml auth.additional_redirect_urls (globs,
                           e.g. https://app.example.com/**)
@@ -815,6 +821,19 @@ async function main(): Promise<void> {
 
   const siteUrl = process.env.TINBASE_SITE_URL || cfg.auth.siteUrl || `http://${opts.host}:${port}`
 
+  // Where this server itself answers. Emailed links are built on it, so it has
+  // to be reachable from a mail client - while siteUrl above is the app, which
+  // is somewhere else entirely once a platform is hosting both. GOTRUE_ and
+  // bare API_EXTERNAL_URL are accepted too, so a GoTrue .env works unchanged.
+  // Defaults to siteUrl: a deployment that has not separated them keeps the
+  // behaviour it has today.
+  const apiExternalUrl =
+    process.env.TINBASE_API_EXTERNAL_URL ||
+    process.env.GOTRUE_API_EXTERNAL_URL ||
+    process.env.API_EXTERNAL_URL ||
+    cfg.auth.apiExternalUrl ||
+    siteUrl
+
   // Allowed redirect targets for emailed links, merged from two sources: the
   // project's own `additional_redirect_urls`, and TINBASE_URI_ALLOW_LIST, which
   // a platform sets to the origins it already knows this project is served on.
@@ -842,6 +861,7 @@ async function main(): Promise<void> {
     // inside a container is meaningless to a user's mail client), then
     // config.toml's site_url, then the bound address for plain local dev.
     siteUrl,
+    apiExternalUrl,
     host: opts.host,
     jwtExpiry: cfg.auth.jwtExpiry,
     uriAllowList,
@@ -894,7 +914,7 @@ async function main(): Promise<void> {
           Admin UI: ${server.url}/_/
              Email: ${sendEmailHook || mailer ? mailDescription : `dev inbox at ${server.url}/inbox (not delivered)`}
     Mail templates: ${Object.keys(emailTemplates).length ? Object.keys(emailTemplates).join(', ') : 'built-in defaults'}
-          Site URL: ${siteUrl}
+          Site URL: ${siteUrl}${apiExternalUrl === siteUrl ? '' : `\n      API external: ${apiExternalUrl}`}
     Redirects to: ${uriAllowList.length ? uriAllowList.join(', ') : 'the site URL origin only'}
             Engine: ${opts.engine === 'native' ? `native postgres (${dataDir})` : opts.engine === 'pgmem' ? 'pg-mem (in-memory, lite)' : `PGlite (${opts.memory ? 'in-memory' : dataDir})`}
            Storage: ${opts.storageDir}
