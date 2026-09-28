@@ -13,6 +13,11 @@ try {
 }
 
 const nextConfig: NextConfig = {
+  // pin the workspace root to website/ so a stray lockfile higher up (e.g. in
+  // $HOME) doesn't make Turbopack pick the wrong root and break next/font
+  turbopack: {
+    root: process.cwd(),
+  },
   env: {
     NEXT_PUBLIC_TINBASE_VERSION: tinbaseVersion,
   },
