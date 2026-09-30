@@ -6,6 +6,8 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.19.0]
+
 ### Added
 
 - `POST /auth/v1/admin/invite` - `auth.admin.inviteUserByEmail`. Creates the account and mails a
