@@ -363,7 +363,10 @@ export class AdminApi {
     const res = await this.db.query<{ version: string; name: string | null; applied_at: string }>(
       `select version, name, applied_at from supabase_migrations.schema_migrations order by version`
     )
-    return json(200, { migrations: res.rows })
+    // `failed`: the migration the server could not apply at start (rolled back,
+    // not in the list above), so a platform can tell the owner instead of
+    // leaving them to find it in the log. null when everything applied.
+    return json(200, { migrations: res.rows, failed: this.db.migrationFailure })
   }
 
   /**

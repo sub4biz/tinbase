@@ -6,6 +6,20 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A migration that fails at start no longer takes the database down. A migration that fails on
+  the data already there (a CHECK that an existing row violates, a NOT NULL over a column with
+  nulls) threw out of startup, the process exited, a supervisor restarted it into the same
+  migration, and the app stayed unreachable until someone edited the file, though the schema that
+  had applied and every row were healthy throughout. `tinbase start` now rolls that migration back,
+  leaves it out of the ledger (so a corrected file applies on the next start), logs
+  `migration failed: <file>: <error>`, stops applying the migrations after it (they may depend on
+  it, and order matters) and keeps serving. The failure is on `GET /admin/v1/migrations` as
+  `failed` (`name`, `error`, `code`, `skipped`, `at`), on `backend.db.migrationFailure`, and in
+  `tinbase status`. An explicit `tinbase migrate`, `backend.migrate()` or `POST /admin/v1/migrate`
+  still fails, so scripts and CI see it. `/health` is unchanged.
+
 ## [0.19.0]
 
 ### Added
