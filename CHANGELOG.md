@@ -6,6 +6,8 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.19.1]
+
 ### Fixed
 
 - A migration that fails at start no longer takes the database down. A migration that fails on
