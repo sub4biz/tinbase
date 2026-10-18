@@ -187,8 +187,18 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
 
   try {
     if (config.migrations?.length || config.seedSql) {
-      const applied = await db.runMigrations(config.migrations ?? [], config.seedSql)
+      // stopOnFailure: a migration that fails on live data is reported and
+      // skipped instead of aborting startup (see Database.runMigrations).
+      const applied = await db.runMigrations(config.migrations ?? [], config.seedSql, { stopOnFailure: true })
       if (applied.length > 0) log(`applied migrations: ${applied.join(', ')}`)
+      const failed = db.migrationFailure
+      if (failed) {
+        log(
+          `migration failed: ${failed.name}: ${failed.error}${failed.code ? ` (SQLSTATE ${failed.code})` : ''}\n` +
+            `  rolled back and not recorded; serving the migrations before it` +
+            (failed.skipped.length ? `, ${failed.skipped.length} later migration(s) wait: ${failed.skipped.join(', ')}` : '')
+        )
+      }
     }
   } catch (e) {
     await failStartup(e)

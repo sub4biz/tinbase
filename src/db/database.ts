@@ -15,7 +15,7 @@ import { rewriteMigrationSql } from './sql-compat.js'
 const DEFAULT_SEARCH_PATH_SQL = `set search_path to "$user", public, extensions`
 import { createPgliteEngine } from './pglite-engine.js'
 import type { DbEngine, EngineResults, EngineTx } from './engine.js'
-import type { MigrationFile, RequestContext } from '../types.js'
+import type { MigrationFailure, MigrationFile, RequestContext } from '../types.js'
 
 /** One column of an introspected table. */
 export interface ColumnInfo {
@@ -108,6 +108,12 @@ export class Database {
   private fnCache = new Map<string, FunctionInfo[]>()
   private cdcListeners = new Set<(e: CdcEvent) => void>()
   private cdcStarted = false
+  /**
+   * The migration the last {@link runMigrations} call could not apply, or null
+   * when every pending migration applied. Set on every engine except pgmem
+   * (which skips unsupported migrations with a warning instead).
+   */
+  migrationFailure: MigrationFailure | null = null
 
   private constructor(
     public engine: DbEngine,
@@ -203,16 +209,28 @@ export class Database {
    * an optional seed, each in its own transaction, then invalidate the schema
    * cache. Returns the names of what was applied this run.
    *
-   * @throws whatever a migration throws, except on the pg-mem engine where an
-   *   unsupported migration is skipped with a warning instead of aborting.
+   * A migration that fails rolls back, is not recorded, and is kept in
+   * {@link migrationFailure}. With `stopOnFailure` (what server start uses) the
+   * call then stops applying migrations and returns normally, so the database
+   * keeps serving the schema that did apply; later migrations wait, because they
+   * may depend on the one that failed and must apply in version order. The seed
+   * is still attempted: it is non-fatal and transactional either way.
+   *
+   * @throws whatever a migration throws, unless `stopOnFailure` is set or the
+   *   engine is pg-mem, where an unsupported migration is skipped with a warning.
    */
-  async runMigrations(migrations: MigrationFile[], seedSql?: string): Promise<string[]> {
+  async runMigrations(
+    migrations: MigrationFile[],
+    seedSql?: string,
+    opts: { stopOnFailure?: boolean } = {}
+  ): Promise<string[]> {
     const applied: string[] = []
+    let failure: MigrationFailure | null = null
     // Plain code-unit comparison (not localeCompare, which is locale-dependent
     // and can reorder `_`/digits) so migrations apply in the same order on every
     // machine, matching the Supabase CLI's lexicographic version ordering.
     const sorted = [...migrations].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    for (const m of sorted) {
+    for (const [i, m] of sorted.entries()) {
       const version = m.name.match(/^(\d+)/)?.[1] ?? m.name
       const seen = await this.engine.query(
         `select 1 from supabase_migrations.schema_migrations where version = $1`,
@@ -247,9 +265,36 @@ export class Database {
           )
           continue
         }
-        throw e
+        const pending: string[] = []
+        for (const later of sorted.slice(i + 1)) {
+          const v = later.name.match(/^(\d+)/)?.[1] ?? later.name
+          const done = await this.engine.query(
+            `select 1 from supabase_migrations.schema_migrations where version = $1`,
+            [v]
+          )
+          if (done.rows.length === 0) pending.push(later.name)
+        }
+        failure = {
+          name: m.name,
+          error: (e as Error)?.message?.split('\n')[0] ?? String(e),
+          code: typeof (e as { code?: unknown })?.code === 'string' ? (e as { code: string }).code : undefined,
+          skipped: pending,
+          at: new Date().toISOString(),
+        }
+        this.migrationFailure = failure
+        if (!opts.stopOnFailure) throw e
+        // A migration that fails on the data already in the database (a CHECK
+        // the existing rows violate, a NOT NULL on a column with nulls) must not
+        // take the database down. It used to: the error aborted startup, the
+        // process exited, the container restarted into the same migration, and
+        // the app was unreachable until someone edited the file - with the
+        // schema that did apply, and every row, perfectly healthy all along.
+        // The transaction rolled back and nothing was recorded, so a corrected
+        // file applies on the next start. The caller reports it (see createBackend).
+        break
       }
     }
+    if (!failure) this.migrationFailure = null
     if (seedSql) {
       const hash = await sha256Hex(seedSql)
       const seen = await this.engine.query(

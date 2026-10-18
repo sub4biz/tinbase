@@ -370,13 +370,13 @@ async function runViaServer(opts: CliOptions): Promise<boolean> {
 
   if (opts.command === 'status') {
     console.log(note)
-    const { migrations } = await callRunningServer<{ migrations: { version: string; name: string | null }[] }>(
-      opts,
-      lock,
-      '/admin/v1/migrations'
-    )
+    const { migrations, failed } = await callRunningServer<{
+      migrations: { version: string; name: string | null }[]
+      failed?: { name: string; error: string } | null
+    }>(opts, lock, '/admin/v1/migrations')
     if (migrations.length === 0) console.log('no migrations applied')
     for (const m of migrations) console.log(`${m.version}  ${m.name ?? ''}`)
+    if (failed) console.log(`FAILED  ${failed.name}: ${failed.error}`)
     return true
   }
 
@@ -903,6 +903,14 @@ async function main(): Promise<void> {
   if (opts.command === 'migrate') {
     const applied = await backend.db.listAppliedMigrations()
     console.log(`${applied.length} migration(s) applied.`)
+    const failed = backend.db.migrationFailure
+    if (failed) {
+      // `start` keeps serving past a failed migration; an explicit migrate must
+      // still fail loudly so scripts and CI see it.
+      console.error(`migration failed: ${failed.name}: ${failed.error}`)
+      await backend.close()
+      process.exit(1)
+    }
     await backend.close()
     return
   }
@@ -911,6 +919,8 @@ async function main(): Promise<void> {
     const applied = await backend.db.listAppliedMigrations()
     if (applied.length === 0) console.log('no migrations applied')
     for (const m of applied) console.log(`${m.version}  ${m.name ?? ''}`)
+    const failed = backend.db.migrationFailure
+    if (failed) console.log(`FAILED  ${failed.name}: ${failed.error}`)
     await backend.close()
     return
   }

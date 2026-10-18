@@ -14,6 +14,24 @@ export interface MigrationFile {
 }
 
 /**
+ * A migration that failed while the server started, and so was not applied.
+ * Its transaction rolled back and it is not in the ledger, so a corrected file
+ * applies on the next start (or `tinbase migrate`).
+ */
+export interface MigrationFailure {
+  /** The migration's file name, e.g. "20240101120000_create_posts". */
+  name: string
+  /** The Postgres error, first line only. */
+  error: string
+  /** The SQLSTATE, when the engine reports one (e.g. "23514" for a violated check). */
+  code?: string
+  /** Migrations after this one that were not attempted, to keep version order. */
+  skipped: string[]
+  /** ISO timestamp of the failed attempt. */
+  at: string
+}
+
+/**
  * Configuration for {@link import('./index.js').createBackend}. Every field is
  * optional; an empty config boots an in-memory PGlite backend on the Supabase
  * local-dev defaults. The CLI derives this object from supabase/config.toml plus
