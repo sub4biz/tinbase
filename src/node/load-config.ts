@@ -92,6 +92,8 @@ export interface ApiConfig {
 export interface StorageConfig {
   /** [storage].file_size_limit: default per-bucket byte limit */
   fileSizeLimit?: number
+  /** [storage].quota: project-wide storage quota in bytes (all objects together) */
+  quota?: number
   /** [storage.buckets.*]: buckets to create at boot */
   buckets?: BucketSeed[]
 }
@@ -374,6 +376,8 @@ function readStorage(root: ConfigTable): StorageConfig {
   const out: StorageConfig = {}
   const limit = getByteSize(storage, 'file_size_limit')
   if (limit !== undefined) out.fileSizeLimit = limit
+  const quota = getByteSize(storage, 'quota')
+  if (quota !== undefined) out.quota = quota
 
   const buckets = tableAt(root, 'storage.buckets')
   if (buckets && buckets.children.size > 0) {

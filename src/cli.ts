@@ -466,6 +466,11 @@ supabase/config.toml (host, port, user, pass, admin_email, sender_name).
   TINBASE_URI_ALLOW_LIST  comma-separated redirect targets to allow in addition
                           to config.toml auth.additional_redirect_urls (globs,
                           e.g. https://app.example.com/**)
+  TINBASE_STORAGE_QUOTA_BYTES
+                          most bytes all stored objects together may take;
+                          writes past it get a 413 storage_quota_exceeded
+                          (overrides config.toml storage.quota; a quota set
+                          with PUT /admin/v1/storage wins over both)
       --memory          in-memory database (no persistence, wasm engine only)
       --engine <e>      native (embedded Postgres, default on macOS/Linux),
                         wasm (PGlite - default on Windows, browser-ready), or
@@ -865,6 +870,12 @@ async function main(): Promise<void> {
     ...(cfg.auth.uriAllowList ?? []),
   ]
 
+  // Project-wide storage quota: TINBASE_STORAGE_QUOTA_BYTES (a platform sets
+  // it per project) wins over config.toml storage.quota. Either is only the
+  // initial value: a quota set through PUT /admin/v1/storage is persisted and
+  // wins over both.
+  const storageQuotaBytes = parseQuotaEnv(process.env.TINBASE_STORAGE_QUOTA_BYTES) ?? cfg.storage.quota
+
   const backend = await createBackend({
     engine,
     databaseUrl: opts.databaseUrl,
@@ -890,6 +901,7 @@ async function main(): Promise<void> {
     dbSchemas: cfg.api.schemas,
     maxRows: cfg.api.maxRows,
     storageFileSizeLimit: cfg.storage.fileSizeLimit,
+    storageQuotaBytes,
     buckets: cfg.storage.buckets,
     migrations: project.migrations,
     seedSql: project.seedSql,
@@ -994,3 +1006,14 @@ main().catch((e) => {
   console.error(e)
   process.exit(1)
 })
+
+/** Parse TINBASE_STORAGE_QUOTA_BYTES: a non-negative integer byte count, else undefined (with a warning). */
+function parseQuotaEnv(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined
+  const n = Number(raw.trim())
+  if (!Number.isSafeInteger(n) || n < 0) {
+    console.warn(`  [storage] ignoring TINBASE_STORAGE_QUOTA_BYTES=${raw}: expected a non-negative integer byte count`)
+    return undefined
+  }
+  return n
+}

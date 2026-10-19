@@ -6,6 +6,33 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.20.0]
+
+### Added
+
+- A project-wide storage quota: the most bytes all stored objects together may take. A write
+  that would take usage past it is refused with 413
+  `{ "statusCode": "413", "error": "storage_quota_exceeded", "message": "This app has reached its
+  storage limit (<used> of <quota>). ..." }`, which supabase-js surfaces as `error.status` 413.
+  It covers uploads (raw and multipart), signed upload URLs, resumable (TUS) uploads (checked at
+  creation and again on completion) and copies; moves don't grow usage. An upsert counts only the
+  growth over the object it replaces, and a write that doesn't grow usage is always allowed, so a
+  project over a lowered quota can still shrink or replace files. A request that declares its
+  `Content-Length` is refused before its body is read. Quota-checked writes are serialized, so
+  concurrent uploads can't together pass the quota.
+- `GET /admin/v1/storage` (service_role) reports `{ used_bytes, quota_bytes, objects,
+  last_refused_at }`, and `PUT /admin/v1/storage` with `{ "quota_bytes": <bytes> | null }` sets
+  the quota. It applies to the next write with no restart and is persisted in `storage.config`.
+- The initial quota comes from `[storage] quota` in config.toml or `TINBASE_STORAGE_QUOTA_BYTES`
+  (env wins); a quota set at runtime wins over both. Unset means unlimited, as before.
+
+### Fixed
+
+- A resumable (TUS) upload ignored the default `[storage] file_size_limit` when its bucket set
+  none, so it could store an object a plain upload would refuse.
+- A copy skipped the destination bucket's size limit, and a copy into a bucket that doesn't exist
+  failed with a 500 instead of 404 `Bucket not found`.
+
 ## [0.19.1]
 
 ### Fixed

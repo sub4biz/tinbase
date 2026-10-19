@@ -12,6 +12,7 @@ import type { EngineResults } from '../db/engine.js'
 import { splitStatements } from '../db/split-statements.js'
 import { signJwt } from '../jwt.js'
 import type { LogBuffer } from '../log-buffer.js'
+import type { StorageQuotaStatus } from '../storage/handler.js'
 import type { RequestContext } from '../types.js'
 
 function json(status: number, body: unknown): Response {
@@ -76,6 +77,11 @@ export class AdminApi {
       authSettings?: AuthSettings
       /** env vars injected into edge functions (service_role-only introspection for the studio) */
       functionEnv?: Record<string, string>
+      /** storage usage and the runtime project-wide storage quota */
+      storage?: {
+        quotaStatus(): Promise<StorageQuotaStatus>
+        setQuota(bytes: number | null): Promise<void>
+      }
     }
   ) {}
 
@@ -120,6 +126,11 @@ export class AdminApi {
         })
       }
       if (path === 'auth-config' && method === 'PATCH') return await this.patchAuthSettings(req)
+      if (path === 'storage' && method === 'GET') {
+        if (!this.info?.storage) return json(404, { error: 'storage is not enabled' })
+        return json(200, await this.info.storage.quotaStatus())
+      }
+      if (path === 'storage' && method === 'PUT') return await this.putStorageQuota(req)
       if (path === 'webhooks' && method === 'GET') return json(200, { webhooks: this.info?.webhooks ?? [] })
       if (path === 'logs' && method === 'GET') return json(200, { logs: this.logs?.list() ?? [] })
       if (path === 'logs' && method === 'DELETE') {
@@ -130,6 +141,27 @@ export class AdminApi {
     } catch (e) {
       return adminError(e)
     }
+  }
+
+  /**
+   * Set (or clear, with null) the project-wide storage quota. Takes effect on
+   * the next write with no restart, and is persisted so a restart keeps it.
+   * Body: `{ "quota_bytes": <non-negative integer> | null }`. Lowering the quota
+   * below current usage deletes nothing; it only refuses writes that would grow
+   * usage further.
+   */
+  private async putStorageQuota(req: Request): Promise<Response> {
+    if (!this.info?.storage) return json(404, { error: 'storage is not enabled' })
+    const body = (await req.json().catch(() => null)) as { quota_bytes?: unknown } | null
+    if (!body || typeof body !== 'object' || !('quota_bytes' in body)) {
+      return json(400, { error: 'body must be {"quota_bytes": <bytes> | null}' })
+    }
+    const q = body.quota_bytes
+    if (q !== null && !(typeof q === 'number' && Number.isSafeInteger(q) && q >= 0)) {
+      return json(400, { error: 'quota_bytes must be a non-negative integer or null' })
+    }
+    await this.info.storage.setQuota(q)
+    return json(200, await this.info.storage.quotaStatus())
   }
 
   /**

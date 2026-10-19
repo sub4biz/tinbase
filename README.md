@@ -132,7 +132,7 @@ const server = await serve(backend, { port: 54321 })
 | --- | --- | --- |
 | REST (PostgREST) | `/rest/v1` | select with embedded resources (to-one, to-many, many-to-many via junction, nested, `!inner`, aliases, hints, casts, JSON paths), all common filter operators incl. `or`/`and` trees, full-text search, order/limit/offset (top-level and per-embed), `single`/`maybeSingle`, `count`, insert/bulk insert, upsert (merge/ignore), update, delete, `Prefer` handling, RPC (scalar, `setof`, void, filters on results), PostgREST-shaped errors |
 | Auth (GoTrue) | `/auth/v1` | email/password signup + sign-in, anonymous sign-in, session refresh with rotation, `getUser`, `updateUser`, sign-out, admin user CRUD (service key), GoTrue-shaped errors. JWTs are HS256 via WebCrypto; passwords are PBKDF2 |
-| Storage | `/storage/v1` | bucket CRUD, upload (raw + multipart), download, public objects, signed URLs, signed upload URLs, list with folder entries, move/copy, remove, size/MIME limits. Metadata lives in `storage.objects` with RLS enforced; bytes go through a pluggable driver (fs in Node, memory anywhere) |
+| Storage | `/storage/v1` | bucket CRUD, upload (raw + multipart), download, public objects, signed URLs, signed upload URLs, list with folder entries, move/copy, remove, size/MIME limits, a project-wide storage quota. Metadata lives in `storage.objects` with RLS enforced; bytes go through a pluggable driver (fs in Node, memory anywhere) |
 | Edge Functions | `/functions/v1` | `supabase.functions.invoke()` - Supabase-style `Deno.serve(handler)` functions (with `Deno.env`) run unchanged, as do `export default` handlers; loaded from `supabase/functions/<name>/index.{ts,js,mjs}` by the CLI or passed via `createBackend({ functions })`. Web-API functions work as-is; `npm:`/`jsr:`/URL imports still need bundling |
 | Queues (pgmq) | `pgmq.*` | Message queues via a pure-SQL pgmq subset (create/send/read/pop/delete/archive, visibility timeouts). Call from SQL or `supabase.schema('pgmq').rpc(...)`. No extension |
 | Cron | `cron.*` | Scheduled jobs, drop-in with pg_cron's API — `cron.schedule(name, '*/5 * * * *', 'sql')` (also the `'N seconds'` form), `cron.unschedule(...)`, and the `cron.job` / `cron.job_run_details` tables. Schedules match in **UTC**, like hosted pg_cron; an in-process scheduler runs due jobs and logs to `cron.job_run_details`. Jobs run while tinbase is up, with service-role privileges. No extension |
@@ -150,6 +150,40 @@ create policy "own rows" on todos
   for all to authenticated
   using (user_id = auth.uid()) with check (user_id = auth.uid());
 ```
+
+### Storage quota
+
+A project can cap how much all of its stored objects take together, on top of the per-object
+`file_size_limit`. A write that would take usage past the quota is refused with a 413 that
+supabase-js surfaces as `error.status === 413` and `error.statusCode === '413'`:
+
+```json
+{ "statusCode": "413", "error": "storage_quota_exceeded",
+  "message": "This app has reached its storage limit (1.9 MB of 2 MB). The project owner can free up space or upgrade their plan." }
+```
+
+Every write path is covered: uploads (raw and multipart), signed upload URLs, resumable (TUS)
+uploads (checked when created and again when they complete) and copies. Moves don't grow usage.
+An upsert counts only the growth over the object it replaces, and a write that doesn't grow usage
+is always allowed, so a project over a lowered quota can still delete, shrink or replace files.
+When a request declares its `Content-Length`, it is refused before the body is read.
+
+Set the initial quota with `[storage] quota = "25MiB"` in `supabase/config.toml` or
+`TINBASE_STORAGE_QUOTA_BYTES` (env wins). Change it at runtime with the service_role key; the
+change applies to the next write, needs no restart, and is persisted (it wins over both initial
+values, and `null` means unlimited):
+
+```bash
+curl -X PUT http://127.0.0.1:54321/admin/v1/storage \
+  -H "apikey: $SERVICE_ROLE_KEY" -H 'content-type: application/json' \
+  -d '{"quota_bytes": 2097152}'
+
+curl http://127.0.0.1:54321/admin/v1/storage -H "apikey: $SERVICE_ROLE_KEY"
+# {"used_bytes":1990000,"quota_bytes":2097152,"objects":12,"last_refused_at":"2026-10-18T12:00:00.000Z"}
+```
+
+`used_bytes` is the sum of `metadata.size` over `storage.objects`; `last_refused_at` is when a
+write was last refused for the quota.
 
 ## Studio
 

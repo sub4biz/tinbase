@@ -252,9 +252,11 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
   const storage = new StorageHandler(db, config.storageDriver ?? new MemoryStorageDriver(), {
     jwtSecret,
     defaultFileSizeLimit: config.storageFileSizeLimit,
+    quotaBytes: config.storageQuotaBytes ?? null,
     log,
   })
   if (config.buckets?.length) await storage.ensureBuckets(config.buckets)
+  await storage.loadQuota()
   const auth = new AuthHandler(db, {
     jwtSecret,
     siteUrl,
@@ -325,6 +327,7 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
       webhooks: config.webhooks ?? [],
       authSettings,
       functionEnv: fnEnv,
+      storage,
     }
   )
 

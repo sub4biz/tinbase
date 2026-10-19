@@ -150,6 +150,14 @@ export interface BackendConfig {
   maxRows?: number
   /** Default per-bucket file size limit in bytes (config.toml storage.file_size_limit). */
   storageFileSizeLimit?: number
+  /**
+   * Initial project-wide storage quota in bytes: the most all stored objects
+   * together may take (config.toml storage.quota, TINBASE_STORAGE_QUOTA_BYTES).
+   * Writes that would exceed it get a 413 `storage_quota_exceeded`. A quota set
+   * at runtime through `PUT /admin/v1/storage` is persisted and wins over this.
+   * Unset means unlimited.
+   */
+  storageQuotaBytes?: number | null
   /** Buckets to create at boot if absent (config.toml storage.buckets.*). */
   buckets?: BucketSeed[]
   /** Force sign-out after this many seconds regardless of activity (config.toml auth.sessions.timebox). */
@@ -206,7 +214,7 @@ export const DEFAULT_JWT_SECRET = 'super-secret-jwt-token-with-at-least-32-chara
  * package.json` in test/version.test.ts now fails the moment the two diverge, so
  * a release cannot quietly ship the wrong number again.
  */
-export const TINBASE_VERSION = '0.19.1'
+export const TINBASE_VERSION = '0.20.0'
 
 /** Per-request execution context derived from apikey/Authorization headers. */
 export interface RequestContext {
