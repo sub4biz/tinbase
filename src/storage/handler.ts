@@ -13,8 +13,48 @@ export interface StorageConfig {
   jwtSecret: string
   /** default per-bucket byte limit applied when a bucket sets none (config.toml storage.file_size_limit) */
   defaultFileSizeLimit?: number
+  /**
+   * Initial project-wide storage quota in bytes (config.toml storage.quota or
+   * TINBASE_STORAGE_QUOTA_BYTES). A quota set through the admin API is
+   * persisted and wins over this. Unset or null means unlimited.
+   */
+  quotaBytes?: number | null
   /** sink for progress/warning lines (e.g. image-transform no-op); no-op when omitted */
   log?: (message: string) => void
+}
+
+/** Storage quota state reported by the admin API (`GET /admin/v1/storage`). */
+export interface StorageQuotaStatus {
+  /** total bytes of every stored object (sum of storage.objects metadata.size) */
+  used_bytes: number
+  /** project-wide quota in bytes, or null when unlimited */
+  quota_bytes: number | null
+  /** number of stored objects */
+  objects: number
+  /** when a write was last refused for exceeding the quota (ISO 8601), or null */
+  last_refused_at: string | null
+}
+
+/**
+ * Slack allowed for multipart framing when pre-checking a request's
+ * Content-Length against a limit before reading the body. The exact file size
+ * is checked again once the body is parsed, so this only has to be generous
+ * enough never to refuse a file that would have fit.
+ */
+const MULTIPART_SLACK = 16 * 1024
+
+/** Format a byte count for a human-readable message (1024-based, like file_size_limit). */
+export function formatBytes(n: number): string {
+  const units = ['bytes', 'KB', 'MB', 'GB', 'TB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  if (i === 0) return `${n} bytes`
+  const rounded = v >= 100 ? Math.round(v) : Math.round(v * 10) / 10
+  return `${rounded} ${units[i]}`
 }
 
 /** Upper bound on signed-URL lifetime (seconds) - 7 days, matching Supabase's practical max. */
@@ -110,12 +150,134 @@ const TUS_VERSION = '1.0.0'
 export class StorageHandler {
   private tusUploads = new Map<string, TusUpload>()
   private warnedTransform = false
+  private quotaBytes: number | null
+  private lastRefusedAt: string | null = null
+  /** Tail of the chain that serializes quota-checked writes (check + persist). */
+  private quotaChain: Promise<unknown> = Promise.resolve()
 
   constructor(
     private db: Database,
     private driver: StorageDriver,
     private config: StorageConfig
-  ) {}
+  ) {
+    this.quotaBytes = config.quotaBytes ?? null
+  }
+
+  // ── quota ───────────────────────────────────────────────────────────────
+
+  /**
+   * Load the persisted quota settings (storage.config). A quota set through the
+   * admin API wins over the configured initial value, including an explicit
+   * null (unlimited). Call once at boot, before serving.
+   */
+  async loadQuota(): Promise<void> {
+    try {
+      const res = await this.db.query(`select key, value from storage.config where key in ('quota', 'quota_refused')`)
+      for (const row of res.rows as { key: string; value: Record<string, unknown> }[]) {
+        if (row.key === 'quota') {
+          const q = row.value?.quota_bytes
+          this.quotaBytes = typeof q === 'number' && Number.isFinite(q) && q >= 0 ? q : null
+        } else if (row.key === 'quota_refused') {
+          const at = row.value?.at
+          this.lastRefusedAt = typeof at === 'string' ? at : null
+        }
+      }
+    } catch {
+      // older data directory without storage.config: keep the configured value
+    }
+  }
+
+  /** Current usage and quota, for the admin API. */
+  async quotaStatus(): Promise<StorageQuotaStatus> {
+    const res = await this.db.query(
+      `select coalesce(sum(((metadata->>'size'))::bigint), 0)::text as used, count(*)::int as objects
+       from storage.objects`
+    )
+    const row = res.rows[0] as { used: string | number; objects: number | string }
+    return {
+      used_bytes: Number(row.used),
+      quota_bytes: this.quotaBytes,
+      objects: Number(row.objects),
+      last_refused_at: this.lastRefusedAt,
+    }
+  }
+
+  /** Set (or clear, with null) the project-wide quota. Applies immediately and persists across restarts. */
+  async setQuota(bytes: number | null): Promise<void> {
+    await this.saveConfig('quota', { quota_bytes: bytes })
+    this.quotaBytes = bytes
+  }
+
+  private async saveConfig(key: string, value: Record<string, unknown>): Promise<void> {
+    await this.db.query(
+      `insert into storage.config (key, value, updated_at) values ($1, $2::jsonb, now())
+       on conflict (key) do update set value = excluded.value, updated_at = now()`,
+      [key, JSON.stringify(value)]
+    )
+  }
+
+  private async usedBytes(): Promise<number> {
+    const res = await this.db.query(
+      `select coalesce(sum(((metadata->>'size'))::bigint), 0)::text as used from storage.objects`
+    )
+    return Number((res.rows[0] as { used: string | number }).used)
+  }
+
+  /**
+   * Refuse a write that would take the project over its storage quota.
+   * `adding` is the size of the object being written; `replaces` names an
+   * existing object it overwrites (upsert), whose size is freed. A write that
+   * doesn't grow usage is always allowed, so an over-quota project can still
+   * shrink or replace files.
+   *
+   * @returns a 413 response to send, or null when the write fits
+   */
+  private async checkQuota(adding: number, replaces?: { bucketId: string; key: string }): Promise<Response | null> {
+    const quota = this.quotaBytes
+    if (quota === null) return null
+    let replaced = 0
+    if (replaces) {
+      const res = await this.db.query(
+        `select ((metadata->>'size'))::bigint as size from storage.objects where bucket_id = $1 and name = $2`,
+        [replaces.bucketId, replaces.key]
+      )
+      const row = res.rows[0] as { size: string | number | null } | undefined
+      replaced = row?.size != null ? Number(row.size) : 0
+    }
+    if (adding <= replaced) return null
+    const used = await this.usedBytes()
+    if (used - replaced + adding <= quota) return null
+    return this.refuseQuota(used, quota)
+  }
+
+  private async refuseQuota(used: number, quota: number): Promise<Response> {
+    this.lastRefusedAt = new Date().toISOString()
+    await this.saveConfig('quota_refused', { at: this.lastRefusedAt }).catch(() => {})
+    this.config.log?.(`[storage] write refused: storage quota reached (${formatBytes(used)} of ${formatBytes(quota)})`)
+    return storageError(
+      413,
+      'storage_quota_exceeded',
+      `This app has reached its storage limit (${formatBytes(used)} of ${formatBytes(quota)}). ` +
+        'The project owner can free up space or upgrade their plan.'
+    )
+  }
+
+  /**
+   * Run a quota-checked write so that two concurrent writes can't both pass the
+   * check and together exceed the quota. Writes are only serialized while a
+   * quota is set; without one they run as before.
+   */
+  private serializeQuota<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.quotaBytes === null) return fn()
+    const run = this.quotaChain.then(fn, fn)
+    this.quotaChain = run.catch(() => {})
+    return run
+  }
+
+  /** Effective per-object size limit for a bucket (its own, else the project default). */
+  private sizeLimitFor(bucket: BucketRow): number | undefined {
+    return bucket.file_size_limit != null ? Number(bucket.file_size_limit) : this.config.defaultFileSizeLimit
+  }
 
   /** Create the given buckets if they don't already exist (config.toml storage.buckets.*). */
   async ensureBuckets(buckets: BucketSeed[]): Promise<void> {
@@ -330,6 +492,19 @@ export class StorageHandler {
     let contentType = req.headers.get('content-type') ?? 'application/octet-stream'
     let cacheControl = req.headers.get('cache-control') ?? 'no-cache'
     let bytes: Uint8Array
+    const sizeLimit = this.sizeLimitFor(bucket)
+    const replaces = upsert ? { bucketId, key } : undefined
+
+    // Refuse an oversized body from its declared length, before buffering it.
+    const declared = Number(req.headers.get('content-length') ?? NaN)
+    if (Number.isFinite(declared) && declared > 0) {
+      const payload = contentType.startsWith('multipart/form-data') ? Math.max(0, declared - MULTIPART_SLACK) : declared
+      if (sizeLimit != null && payload > sizeLimit) {
+        return storageError(413, 'Payload too large', 'The object exceeded the maximum allowed size')
+      }
+      const refused = await this.checkQuota(payload, replaces)
+      if (refused) return refused
+    }
 
     if (contentType.startsWith('multipart/form-data')) {
       // storage-js wraps Blob/File bodies in FormData with an EMPTY field
@@ -349,7 +524,6 @@ export class StorageHandler {
 
     // Per-bucket limit, falling back to the project-wide default (config.toml
     // storage.file_size_limit) when the bucket sets none.
-    const sizeLimit = bucket.file_size_limit != null ? Number(bucket.file_size_limit) : this.config.defaultFileSizeLimit
     if (sizeLimit != null && bytes.length > sizeLimit) {
       return storageError(413, 'Payload too large', 'The object exceeded the maximum allowed size')
     }
@@ -361,8 +535,13 @@ export class StorageHandler {
     }
 
     try {
-      const id = await this.persistObject(ctx, bucketId, key, bytes, contentType, cacheControl, upsert)
-      return json(200, { Key: `${bucketId}/${key}`, Id: id })
+      const body = bytes
+      return await this.serializeQuota(async () => {
+        const refused = await this.checkQuota(body.length, replaces)
+        if (refused) return refused
+        const id = await this.persistObject(ctx, bucketId, key, body, contentType, cacheControl, upsert)
+        return json(200, { Key: `${bucketId}/${key}`, Id: id })
+      })
     } catch (e) {
       const pg = e as { code?: string }
       if (pg.code === '23505') {
@@ -463,16 +642,21 @@ export class StorageHandler {
       }
       const bucket = await this.loadBucket(bucketId)
       if (!bucket) return storageError(404, 'Bucket not found', 'Bucket not found')
-      if (bucket.file_size_limit != null && length > Number(bucket.file_size_limit)) {
+      const sizeLimit = this.sizeLimitFor(bucket)
+      if (sizeLimit != null && length > sizeLimit) {
         return storageError(413, 'Payload too large', 'The object exceeded the maximum allowed size')
       }
+      const tusUpsert = (req.headers.get('x-upsert') ?? 'false').toLowerCase() === 'true'
+      // Refuse before allocating the upload buffer; re-checked when it completes.
+      const refused = await this.checkQuota(length, tusUpsert ? { bucketId, key } : undefined)
+      if (refused) return refused
       const uploadId = crypto.randomUUID()
       const upload: TusUpload = {
         bucketId,
         key,
         contentType: meta.contentType ?? 'application/octet-stream',
         cacheControl: meta.cacheControl ?? 'no-cache',
-        upsert: (req.headers.get('x-upsert') ?? 'false').toLowerCase() === 'true',
+        upsert: tusUpsert,
         length,
         offset: 0,
         data: new Uint8Array(length),
@@ -550,15 +734,28 @@ export class StorageHandler {
     if (upload.offset < upload.length) return undefined
 
     try {
-      await this.persistObject(
-        upload.ctx,
-        upload.bucketId,
-        upload.key,
-        upload.data,
-        upload.contentType,
-        upload.cacheControl,
-        upload.upsert
-      )
+      const refused = await this.serializeQuota(async () => {
+        // other writes may have landed since the upload was created
+        const r = await this.checkQuota(
+          upload.length,
+          upload.upsert ? { bucketId: upload.bucketId, key: upload.key } : undefined
+        )
+        if (r) return r
+        await this.persistObject(
+          upload.ctx,
+          upload.bucketId,
+          upload.key,
+          upload.data,
+          upload.contentType,
+          upload.cacheControl,
+          upload.upsert
+        )
+        return null
+      })
+      if (refused) {
+        this.tusUploads.delete(id)
+        return refused
+      }
     } catch (e) {
       this.tusUploads.delete(id)
       const pg = e as { code?: string }
@@ -677,24 +874,37 @@ export class StorageHandler {
       return json(200, { message: 'Successfully moved' })
     }
 
-    const res = await this.db.withContext(ctx, (q) =>
-      q(
-        `insert into storage.objects (bucket_id, name, owner, metadata, version)
-         select $3, $4, $5, metadata, gen_random_uuid()::text
-         from storage.objects where bucket_id = $1 and name = $2
-         returning id`,
-        [body.bucketId, body.sourceKey, dstBucket, body.destinationKey, ctx.claims?.sub ?? null]
-      )
-    )
-    if (res.rows.length === 0) return storageError(404, 'not_found', 'Object not found')
-    const copyId = (res.rows[0] as { id: string }).id
-    try {
-      await this.driver.put(`${dstBucket}/${body.destinationKey}`, bytes)
-    } catch (e) {
-      await this.db.query(`delete from storage.objects where id = $1`, [copyId]).catch(() => {})
-      throw e
+    // A copy stores a second object, so it is subject to the destination
+    // bucket's size limit and to the project quota like any upload.
+    const destination = await this.loadBucket(dstBucket)
+    if (!destination) return storageError(404, 'Bucket not found', 'Bucket not found')
+    const sizeLimit = this.sizeLimitFor(destination)
+    if (sizeLimit != null && bytes.length > sizeLimit) {
+      return storageError(413, 'Payload too large', 'The object exceeded the maximum allowed size')
     }
-    return json(200, { Id: copyId, Key: `${dstBucket}/${body.destinationKey}` })
+
+    return this.serializeQuota(async () => {
+      const refused = await this.checkQuota(bytes.length)
+      if (refused) return refused
+      const res = await this.db.withContext(ctx, (q) =>
+        q(
+          `insert into storage.objects (bucket_id, name, owner, metadata, version)
+           select $3, $4, $5, metadata, gen_random_uuid()::text
+           from storage.objects where bucket_id = $1 and name = $2
+           returning id`,
+          [body.bucketId, body.sourceKey, dstBucket, body.destinationKey, ctx.claims?.sub ?? null]
+        )
+      )
+      if (res.rows.length === 0) return storageError(404, 'not_found', 'Object not found')
+      const copyId = (res.rows[0] as { id: string }).id
+      try {
+        await this.driver.put(`${dstBucket}/${body.destinationKey}`, bytes)
+      } catch (e) {
+        await this.db.query(`delete from storage.objects where id = $1`, [copyId]).catch(() => {})
+        throw e
+      }
+      return json(200, { Id: copyId, Key: `${dstBucket}/${body.destinationKey}` })
+    })
   }
 
   private async listObjects(req: Request, ctx: RequestContext, bucketId: string): Promise<Response> {

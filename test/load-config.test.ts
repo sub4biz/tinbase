@@ -162,6 +162,11 @@ allowed_mime_types = ["image/png", "image/jpeg"]
     ])
   })
 
+  it('reads [storage].quota as a byte size', () => {
+    const dir = project(`\n[storage]\nquota = "25MiB"\n`)
+    expect(loadProjectConfig(dir).storage.quota).toBe(25 * 1024 * 1024)
+  })
+
   it('reads [db.seed] enabled + sql_paths', () => {
     const dir = project(`\n[db.seed]\nenabled = false\nsql_paths = ["seed.sql", "extra.sql"]\n`)
     expect(loadProjectConfig(dir).seed).toEqual({ enabled: false, paths: ['seed.sql', 'extra.sql'] })

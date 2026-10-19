@@ -151,6 +151,13 @@ create table if not exists storage.objects (
   unique (bucket_id, name)
 );
 
+-- runtime-mutable storage settings (the project-wide storage quota)
+create table if not exists storage.config (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz default now()
+);
+
 create table if not exists supabase_migrations.schema_migrations (
   version text primary key,
   name text,
@@ -439,6 +446,13 @@ create table if not exists storage.objects (
   updated_at timestamptz default now(),
   last_accessed_at timestamptz default now(),
   unique (bucket_id, name)
+);
+
+-- runtime-mutable storage settings (the project-wide storage quota)
+create table if not exists storage.config (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz default now()
 );
 
 create index if not exists objects_bucket_name_idx on storage.objects(bucket_id, name);
