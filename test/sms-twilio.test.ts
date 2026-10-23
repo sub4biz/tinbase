@@ -131,14 +131,25 @@ describe('the backend sends through Twilio from the runtime settings', () => {
     const r = await supabase.auth.signInWithOtp({ phone: '+15005550006' })
     expect(r.error).not.toBeNull()
     expect(r.error?.status).toBe(500)
-    // GoTrue's code and wording for a provider refusal, with the provider's reason
-    expect(r.error?.code).toBe('sms_send_failed')
-    expect(r.error?.message).toMatch(/^Error sending sms OTP: .*Too Many Requests/)
+    // GoTrue's code and wording for a provider refusal, with the provider's reason. Read off the
+    // wire: supabase-js folds any 5xx into a retryable fetch error and drops the code, as it does
+    // against GoTrue itself.
+    const raw = await backend.fetch(
+      new Request('http://localhost:54321/auth/v1/otp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', apikey: backend.anonKey },
+        body: JSON.stringify({ phone: '+15005550007' }),
+      })
+    )
+    expect(raw.status).toBe(500)
+    const body = (await raw.json()) as { error_code: string; msg: string }
+    expect(body.error_code).toBe('sms_send_failed')
+    expect(body.msg).toMatch(/^Error sending sms OTP: .*Too Many Requests/)
     expect(backend.logs.list(500).some((l) => l.msg.startsWith('[sms] FAILED to=+15005550006'))).toBe(true)
     // the text never went out, so max_frequency has nothing to measure from
     const again = await supabase.auth.signInWithOtp({ phone: '+15005550006' })
     expect(again.error?.code).not.toBe('over_sms_send_rate_limit')
-    expect(captured).toHaveLength(2)
+    expect(captured).toHaveLength(3)
   })
 })
 
