@@ -8,6 +8,7 @@ All notable changes to tinbase are documented here. The format follows
 
 ### Fixed
 
+- A write that asked for its row back (`Prefer: return=representation`, supabase-js `.insert(row).select('a, b')`) failed with 42501 on a table with column-level SELECT grants (`revoke select … ; grant select (a, b) …`, the usual way to hide a secret column), because the mutation CTE returned `*`. It now returns only the base columns the `select=` projection reads, as PostgREST does; `select=*` is still refused when a column is unreadable.
 - A phone OTP whose text the provider refused left its code redeemable; the code is now
   discarded with the failed send, as GoTrue does.
 
