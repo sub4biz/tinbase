@@ -236,10 +236,10 @@ export class QueryBuilder {
     const alias = this.aliasMutations ? 't0' : ''
     const asClause = alias ? ` as ${quoteIdent(alias)}` : ''
     const where = this.baseWhere(alias, [])
-    const update = `update ${this.qualify(table)}${asClause} set ${sets.join(', ')}${where} returning *`
+    const update = `update ${this.qualify(table)}${asClause} set ${sets.join(', ')}${where}`
     this.assertAllPathsConsumed()
-    if (!opts.returning) return { sql: update.replace(/ returning \*$/, ''), params }
-    return { sql: this.wrapMutation(update, table, true), params }
+    if (!opts.returning) return { sql: update, params }
+    return { sql: this.wrapMutation(update, table), params }
   }
 
   /** Build a DELETE scoped by the base filters. */
@@ -248,16 +248,26 @@ export class QueryBuilder {
     const alias = this.aliasMutations ? 't0' : ''
     const asClause = alias ? ` as ${quoteIdent(alias)}` : ''
     const where = this.baseWhere(alias, [])
-    const del = `delete from ${this.qualify(table)}${asClause}${where} returning *`
+    const del = `delete from ${this.qualify(table)}${asClause}${where}`
     this.assertAllPathsConsumed()
-    if (!opts.returning) return { sql: del.replace(/ returning \*$/, ''), params: [] }
-    return { sql: this.wrapMutation(del, table, true), params: [] }
+    if (!opts.returning) return { sql: del, params: [] }
+    return { sql: this.wrapMutation(del, table), params: [] }
   }
 
-  /** Wrap a mutation in a CTE so the response can apply select= (incl. embeds). */
-  private wrapMutation(mutation: string, table: string, alreadyHasReturning = false): string {
-    const withReturning = alreadyHasReturning ? mutation : `${mutation} returning *`
-    const { exprs, innerConds } = this.buildSelectList(this.q.select, table, '_mut', [])
+  /**
+   * Wrap a mutation in a CTE so the response can apply select= (incl. embeds).
+   *
+   * The CTE RETURNs only the base columns the projection reads, not `*`:
+   * Postgres checks SELECT privilege on every column `returning *` names, so on
+   * a table with column-level grants (`revoke select … ; grant select (a, b) …`,
+   * the usual way to hide a secret column) every insert/update/delete that asked
+   * for its row back failed with 42501 even when `select=` listed only readable
+   * columns. PostgREST returns just the selected columns, and supabase-js's
+   * `.insert(row).select('a, b')` relies on that.
+   */
+  private wrapMutation(mutation: string, table: string): string {
+    const { exprs, innerConds } = this.buildSelectList(this.q.select, table, MUTATION_ALIAS, [])
+    const withReturning = `${mutation} returning ${returningList(exprs)}`
     if (innerConds.length > 0) {
       throw new ApiError(400, {
         code: 'PGRST100',
@@ -266,7 +276,7 @@ export class QueryBuilder {
         hint: null,
       })
     }
-    return `with _mut as (${withReturning}) select coalesce(json_agg(row_to_json(_r)), ${AGG_EMPTY}) as body from (select ${exprs.join(', ')} from _mut) _r`
+    return `with ${MUTATION_ALIAS} as (${withReturning}) select coalesce(json_agg(row_to_json(_r)), ${AGG_EMPTY}) as body from (select ${exprs.join(', ')} from ${MUTATION_ALIAS}) _r`
   }
 
   // ── select list & embeds ──────────────────────────────────────────────
@@ -646,6 +656,24 @@ export class QueryBuilder {
 }
 
 // ── shared rendering helpers ────────────────────────────────────────────
+
+/** Alias of the mutation CTE every projection expression reads its base columns from. */
+const MUTATION_ALIAS = '_mut'
+
+/**
+ * The RETURNING list for a mutation CTE: the distinct base columns the projection
+ * expressions reference through the CTE alias (top-level columns, the base of a
+ * JSON arrow path, and the keys an embed correlates on), quoted as they appear.
+ * `*` when the projection selects everything, or when nothing is referenced.
+ */
+export function returningList(exprs: string[]): string {
+  const star = `${quoteIdent(MUTATION_ALIAS)}.*`
+  if (exprs.some((e) => e === star)) return '*'
+  const ref = new RegExp(`${quoteIdent(MUTATION_ALIAS)}\\.("(?:[^"]|"")+")`, 'g')
+  const cols = new Set<string>()
+  for (const e of exprs) for (const m of e.matchAll(ref)) cols.add(m[1])
+  return cols.size > 0 ? [...cols].join(', ') : '*'
+}
 
 /**
  * Render a (possibly JSON-arrowed) column reference: `data->a->>b` becomes
