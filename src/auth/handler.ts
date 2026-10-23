@@ -121,6 +121,9 @@ function authError(status: number, errorCode: string, msg: string): Response {
   return json(status, { code: status, error_code: errorCode, msg })
 }
 
+/** The SMS provider refused or could not be reached; rendered as GoTrue's `sms_send_failed`. */
+class SmsSendFailed extends Error {}
+
 /**
  * The per-request inputs supabase-js attaches to an email-sending call.
  *
@@ -420,6 +423,7 @@ export class AuthHandler {
       return authError(404, 'not_found', `unknown auth endpoint: ${path}`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
+      if (e instanceof SmsSendFailed) return authError(500, 'sms_send_failed', `Error sending sms OTP: ${msg}`)
       return authError(500, 'unexpected_failure', msg)
     }
   }
@@ -1494,7 +1498,15 @@ export class AuthHandler {
       [user.id, phone, tokenType, code, `${this.settings.smsOtpExpirySeconds} seconds`]
     )
     const body = renderSmsTemplate(this.config.smsTemplate || DEFAULT_SMS_TEMPLATE, code)
-    const messageId = await this.config.smsSender.send({ to: e164(phone), body })
+    let messageId: string | void
+    try {
+      messageId = await this.config.smsSender.send({ to: e164(phone), body })
+    } catch (e) {
+      // GoTrue's shape for a provider that refused the text (bad number, over
+      // the provider's limit, unreachable): the caller learns why, under the
+      // code supabase-js clients already handle, rather than a bare 500.
+      throw new SmsSendFailed(e instanceof Error ? e.message : String(e))
+    }
     await this.markEmailSent(user.id, column)
     return messageId ?? undefined
   }

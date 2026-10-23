@@ -27,7 +27,8 @@ All notable changes to tinbase are documented here. The format follows
   `over_sms_send_rate_limit`.
 - A `TwilioSmsSender` (one form-encoded POST to the Messages API, no SDK) and an `SmsSender`
   interface on `createBackend({ smsSender })`, the phone counterpart of `mailer`. Without a
-  provider the texts are captured in the dev inbox at `/inbox`, marked `channel: "sms"`.
+  provider the texts are captured in the dev inbox at `/inbox`, marked `channel: "sms"`. A provider
+  refusal answers GoTrue's 500 `sms_send_failed` with the provider's reason.
 - Runtime settings for the above (`phoneEnabled`, `smsAutoconfirm`, `smsOtpLength`,
   `smsOtpExpirySeconds`, `maxSmsFrequencySeconds`, `smsTwilio`) through `PATCH
   /admin/v1/auth-config`, and a Phone section on Studio's Sign In / Providers page. The Twilio auth
