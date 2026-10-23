@@ -12,7 +12,7 @@ import { ADMIN_HTML } from './admin/ui.js'
 import { AuthHandler } from './auth/handler.js'
 import { RateLimiter } from './auth/rate-limit.js'
 import { InboxMailer } from './auth/inbox.js'
-import { loadAuthSettings } from './auth/settings.js'
+import { loadAuthSettings, resolveAuthDefaults } from './auth/settings.js'
 import { LogBuffer } from './log-buffer.js'
 import { FunctionsHandler, type EdgeFunction } from './functions/handler.js'
 import { installDenoShim } from './functions/deno-shim.js'
@@ -26,7 +26,17 @@ import { WebhooksService, type WebhookDelivery } from './webhooks/service.js'
 import { CronService } from './cron/service.js'
 import { NetService, type NetDelivery } from './net/service.js'
 import { RetentionService } from './retention/service.js'
-import { DEFAULT_JWT_SECRET, type BackendConfig, type MailMessage, type Mailer, type MigrationFile, type RequestContext } from './types.js'
+import { TwilioSmsSender } from './auth/sms.js'
+import {
+  DEFAULT_JWT_SECRET,
+  type BackendConfig,
+  type MailMessage,
+  type Mailer,
+  type MigrationFile,
+  type RequestContext,
+  type SmsMessage,
+  type SmsSender,
+} from './types.js'
 import { assertSecretsSafe, isNetworkExposed } from './security.js'
 
 export * from './types.js'
@@ -36,6 +46,7 @@ export { createPgliteEngine } from './db/pglite-engine.js'
 export { MemoryStorageDriver } from './storage/driver.js'
 export { InboxMailer, type InboxEntry } from './auth/inbox.js'
 export { ResendMailer, type ResendMailerOptions } from './auth/resend.js'
+export { TwilioSmsSender, normalizePhone, renderSmsTemplate, DEFAULT_SMS_TEMPLATE, DEFAULT_TWILIO_API_URL, type TwilioConfig } from './auth/sms.js'
 export { callSendEmailHook, type SendEmailHookConfig, type SendEmailHookPayload, type EmailData, type EmailActionType } from './auth/send-email-hook.js'
 export { renderTemplate, htmlToText, type EmailTemplate, type EmailTemplates, type EmailTemplateName, type TemplateVars } from './auth/templates.js'
 export { LogBuffer, type LogEntry, type LogLevel } from './log-buffer.js'
@@ -249,6 +260,46 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
   // committed defaults, the persisted auth.config row layers live studio edits
   // on top, and the auth handler reads the merged object per request
   const authSettings = await loadAuthSettings(db, config.authSettings)
+  const authSettingsBaseline = resolveAuthDefaults(config.authSettings)
+
+  // Phone OTP delivery. A custom sender wins, as a custom mailer does. Otherwise
+  // the built-in Twilio provider, but decided per send rather than at boot: the
+  // credentials are runtime settings (config.toml [auth.sms.twilio] with
+  // TINBASE_SMS_TWILIO_* filling gaps, Studio edits on top), so a project can
+  // paste its Twilio keys into Studio and send without a restart. With no
+  // credentials the text lands in the dev inbox like mail does - or, with a
+  // custom mailer and so no inbox, is logged as undeliverable.
+  const logSms = (msg: SmsMessage) =>
+    log(config.logMailBody ? `[sms] to=${msg.to}\n${msg.body}` : `[sms] to=${msg.to}`)
+  const smsProviderName = config.smsSender ? 'custom' : authSettings.smsTwilio.accountSid ? 'twilio' : 'inbox'
+  const smsSender: SmsSender = {
+    send: async (msg) => {
+      const tw = authSettings.smsTwilio
+      const provider: SmsSender | null = config.smsSender
+        ? config.smsSender
+        : tw.accountSid && tw.authToken
+          ? new TwilioSmsSender({ ...tw, apiUrl: config.smsApiUrl, fetch: config.smsFetch })
+          : null
+      if (!provider) {
+        if (inbox) {
+          await inbox.sendSms(msg)
+          logSms(msg)
+          return
+        }
+        log(`[sms] NOT CONFIGURED to=${msg.to}: no SMS provider, the code was not sent`)
+        return
+      }
+      let id: string | void
+      try {
+        id = await provider.send(msg)
+      } catch (e) {
+        log(`[sms] FAILED to=${msg.to}: ${e instanceof Error ? e.message : String(e)}`)
+        throw e
+      }
+      logSms(msg)
+      return id
+    },
+  }
   const storage = new StorageHandler(db, config.storageDriver ?? new MemoryStorageDriver(), {
     jwtSecret,
     defaultFileSizeLimit: config.storageFileSizeLimit,
@@ -264,6 +315,9 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
     jwtExpiry,
     sessionTimeboxSeconds: config.sessionTimeboxSeconds,
     mailer,
+    smsSender,
+    smsTemplate: config.smsTemplate,
+    smsProviderName,
     emailTemplates: config.emailTemplates,
     sendEmailHook: config.sendEmailHook,
     hookFetch: config.hookFetch,
@@ -324,8 +378,10 @@ export async function createBackend(config: BackendConfig = {}): Promise<Tinbase
       edgeFunctions: [...fnMap.keys()],
       oauthProviders: Object.keys(config.oauthProviders ?? {}),
       inbox: inbox !== null,
+      sms: { custom: !!config.smsSender, apiUrl: config.smsApiUrl },
       webhooks: config.webhooks ?? [],
       authSettings,
+      authSettingsBaseline,
       functionEnv: fnEnv,
       storage,
     }

@@ -78,6 +78,14 @@ export interface AuthConfig {
    * it. Outranks every transport, because it replaces the rendering too.
    */
   sendEmailHook?: { enabled?: boolean; uri?: string; secret?: string }
+  /** `[auth.sms] template`: the text body, with `{{ .Code }}` for the OTP. */
+  smsTemplate?: string
+  /**
+   * `[auth.sms.twilio]`, Supabase's provider block, plus `api_url` (ours) for
+   * a Twilio-compatible gateway. Secrets arrive through `env(VAR)` like SMTP's.
+   * Returned as-is; the CLI fills empty fields from `TINBASE_SMS_TWILIO_*`.
+   */
+  smsTwilio?: { enabled?: boolean; accountSid?: string; authToken?: string; messageServiceSid?: string; apiUrl?: string }
 }
 
 /** The `[api]` slice of config.toml. */
@@ -153,6 +161,10 @@ function readAuth(root: ConfigTable, env: NodeJS.ProcessEnv): AuthConfig {
 
   const smtp = readSmtp(root)
   if (smtp) out.smtp = smtp
+  const smsTemplate = getString(tableAt(root, 'auth.sms'), 'template')
+  if (smsTemplate !== undefined) out.smsTemplate = smsTemplate
+  const twilio = readTwilio(root)
+  if (twilio) out.smsTwilio = twilio
   const hook = tableAt(root, 'auth.hook.send_email')
   if (hook) {
     const enabled = getBool(hook, 'enabled')
@@ -205,6 +217,28 @@ function readSmtp(root: ConfigTable): AuthConfig['smtp'] | undefined {
 }
 
 /**
+ * `[auth.sms.twilio]`, spelled as Supabase spells it (`account_sid`,
+ * `auth_token`, `message_service_sid`), with one addition: `api_url`, the base
+ * of a Twilio-compatible API other than Twilio's own.
+ */
+function readTwilio(root: ConfigTable): AuthConfig['smsTwilio'] | undefined {
+  const t = tableAt(root, 'auth.sms.twilio')
+  if (!t) return undefined
+  const out: NonNullable<AuthConfig['smsTwilio']> = {}
+  const enabled = getBool(t, 'enabled')
+  if (enabled !== undefined) out.enabled = enabled
+  const accountSid = getString(t, 'account_sid')
+  if (accountSid !== undefined) out.accountSid = accountSid
+  const authToken = getString(t, 'auth_token')
+  if (authToken !== undefined) out.authToken = authToken
+  const messageServiceSid = getString(t, 'message_service_sid')
+  if (messageServiceSid !== undefined) out.messageServiceSid = messageServiceSid
+  const apiUrl = getString(t, 'api_url')
+  if (apiUrl !== undefined) out.apiUrl = apiUrl
+  return Object.keys(out).length ? out : undefined
+}
+
+/**
  * `[auth.email.template.<name>]` blocks: `subject` and `content_path`, exactly
  * as Supabase's config.toml spells them. The body itself is left on disk for
  * the CLI to read - this module also runs where there is no filesystem.
@@ -223,10 +257,11 @@ function readEmailTemplates(root: ConfigTable): Record<string, { subject?: strin
   return Object.keys(out).length ? out : undefined
 }
 
-/** The [auth]/[auth.email]/[auth.mfa] keys that become AuthSettings defaults. */
+/** The [auth]/[auth.email]/[auth.sms]/[auth.mfa] keys that become AuthSettings defaults. */
 function readAuthSettings(root: ConfigTable): Partial<AuthSettings> {
   const auth = tableAt(root, 'auth')
   const email = tableAt(root, 'auth.email')
+  const sms = tableAt(root, 'auth.sms')
   const mfa = tableAt(root, 'auth.mfa')
   const mfaTotp = tableAt(root, 'auth.mfa.totp')
   const out: Partial<AuthSettings> = {}
@@ -258,6 +293,20 @@ function readAuthSettings(root: ConfigTable): Partial<AuthSettings> {
   const maxFrequency = getDurationSeconds(email, 'max_frequency') ?? getInt(email, 'max_frequency')
   if (maxFrequency !== undefined) out.maxEmailFrequencySeconds = maxFrequency
 
+  // [auth.sms]: Supabase's keys. enable_signup is whether phone auth is on at
+  // all (GoTrue's EXTERNAL_PHONE_ENABLED), enable_confirmations the inverse of
+  // SMS autoconfirm, both as the Supabase dashboard presents them.
+  const phoneEnabled = getBool(sms, 'enable_signup')
+  if (phoneEnabled !== undefined) out.phoneEnabled = phoneEnabled
+  const smsConfirmations = getBool(sms, 'enable_confirmations')
+  if (smsConfirmations !== undefined) out.smsAutoconfirm = !smsConfirmations
+  const smsOtpLength = getInt(sms, 'otp_length')
+  if (smsOtpLength !== undefined) out.smsOtpLength = smsOtpLength
+  const smsOtpExpiry = getInt(sms, 'otp_expiry')
+  if (smsOtpExpiry !== undefined) out.smsOtpExpirySeconds = smsOtpExpiry
+  const smsMaxFrequency = getDurationSeconds(sms, 'max_frequency') ?? getInt(sms, 'max_frequency')
+  if (smsMaxFrequency !== undefined) out.maxSmsFrequencySeconds = smsMaxFrequency
+
   const maxFactors = getInt(mfa, 'max_enrolled_factors')
   if (maxFactors !== undefined) out.maxEnrolledFactors = maxFactors
   const totpEnroll = getBool(mfaTotp, 'enroll_enabled')
@@ -288,6 +337,8 @@ function readRateLimits(root: ConfigTable): Record<string, RateLimitRule> | unde
     out.otp = { limit: email, windowMs: ONE_HOUR }
     out.recover = { limit: email, windowMs: ONE_HOUR }
   }
+  const sms = getInt(rl, 'sms_sent')
+  if (sms !== undefined) out.sms = { limit: sms, windowMs: ONE_HOUR }
   return Object.keys(out).length ? out : undefined
 }
 

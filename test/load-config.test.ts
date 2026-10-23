@@ -350,3 +350,52 @@ describe('getDurationSeconds — compound Go durations', () => {
     expect(cfg.sessionTimeboxSeconds).toBe(86400)
   })
 })
+
+describe('loadProjectConfig — [auth.sms] phone auth', () => {
+  it("maps [auth.sms] to the phone settings and reads Supabase's [auth.sms.twilio] block plus api_url", () => {
+    const dir = project(`
+[auth.sms]
+enable_signup = true
+enable_confirmations = true
+otp_length = 8
+otp_expiry = 120
+max_frequency = "5s"
+template = "Acme: {{ .Code }}"
+
+[auth.sms.twilio]
+enabled = true
+account_sid = "ACabc"
+message_service_sid = "MGxyz"
+auth_token = "env(TWILIO_TOKEN)"
+api_url = "https://gateway.example.com"
+
+[auth.rate_limit]
+sms_sent = 7
+`)
+    const auth = loadProjectConfig(dir, { TWILIO_TOKEN: 'from-env' } as NodeJS.ProcessEnv).auth
+    expect(auth.settings).toMatchObject({
+      phoneEnabled: true,
+      smsAutoconfirm: false,
+      smsOtpLength: 8,
+      smsOtpExpirySeconds: 120,
+      maxSmsFrequencySeconds: 5,
+    })
+    expect(auth.smsTemplate).toBe('Acme: {{ .Code }}')
+    expect(auth.smsTwilio).toEqual({
+      enabled: true,
+      accountSid: 'ACabc',
+      authToken: 'from-env',
+      messageServiceSid: 'MGxyz',
+      apiUrl: 'https://gateway.example.com',
+    })
+    expect(auth.rateLimits?.sms).toEqual({ limit: 7, windowMs: 60 * 60 * 1000 })
+  })
+
+  it('leaves phone auth off and the provider absent when the sections are missing', () => {
+    const dir = project(`\n[auth]\nsite_url = "http://localhost:3000"\n`)
+    const auth = loadProjectConfig(dir).auth
+    expect(auth.settings.phoneEnabled).toBeUndefined()
+    expect(auth.smsTwilio).toBeUndefined()
+    expect(auth.smsTemplate).toBeUndefined()
+  })
+})

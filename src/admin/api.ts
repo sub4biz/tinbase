@@ -5,6 +5,20 @@
  * bypassed by the service_role), so the studio uses the same paths an app does.
  */
 import { applyAuthSettingsPatch, saveAuthSettings, type AuthSettings } from '../auth/settings.js'
+import { DEFAULT_TWILIO_API_URL } from '../auth/sms.js'
+
+/**
+ * The settings as Studio may see them: the Twilio auth token is a secret and
+ * is never echoed back, only whether one is set. A Studio edit that leaves the
+ * field alone sends no `authToken`, so the stored one is kept.
+ */
+export function redactSettings(s: AuthSettings): Record<string, unknown> {
+  return {
+    ...s,
+    smsTwilio: { accountSid: s.smsTwilio.accountSid, messageServiceSid: s.smsTwilio.messageServiceSid, authToken: '' },
+    smsTwilioAuthTokenSet: s.smsTwilio.authToken !== '',
+  }
+}
 import { statusForSqlState } from '../rest/errors.js'
 import { quoteIdent } from '../db/database.js'
 import type { Database } from '../db/database.js'
@@ -71,10 +85,14 @@ export class AdminApi {
       oauthProviders: string[]
       /** whether the local dev inbox mailer is mounted at /inbox */
       inbox: boolean
+      /** SMS delivery: a custom sender was provided, and where the built-in Twilio provider posts */
+      sms?: { custom: boolean; apiUrl?: string }
       /** statically configured database webhooks */
       webhooks: unknown[]
       /** SHARED runtime auth settings - mutated in place so the auth handler sees changes instantly */
       authSettings?: AuthSettings
+      /** the config.toml / env baseline those settings started from, so only Studio's own edits are persisted */
+      authSettingsBaseline?: AuthSettings
       /** env vars injected into edge functions (service_role-only introspection for the studio) */
       functionEnv?: Record<string, string>
       /** storage usage and the runtime project-wide storage quota */
@@ -122,7 +140,11 @@ export class AdminApi {
         return json(200, {
           providers: this.info?.oauthProviders ?? [],
           inbox: this.info?.inbox ?? false,
-          settings: this.info?.authSettings ?? null,
+          sms: {
+            custom: this.info?.sms?.custom ?? false,
+            apiUrl: this.info?.sms?.apiUrl ?? DEFAULT_TWILIO_API_URL,
+          },
+          settings: this.info?.authSettings ? redactSettings(this.info.authSettings) : null,
         })
       }
       if (path === 'auth-config' && method === 'PATCH') return await this.patchAuthSettings(req)
@@ -183,8 +205,8 @@ export class AdminApi {
     }
     const err = applyAuthSettingsPatch(settings, body)
     if (err) return json(400, { error: err })
-    await saveAuthSettings(this.db, settings)
-    return json(200, { settings })
+    await saveAuthSettings(this.db, settings, this.info?.authSettingsBaseline)
+    return json(200, { settings: redactSettings(settings) })
   }
 
   /**

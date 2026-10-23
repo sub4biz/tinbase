@@ -4,7 +4,7 @@
  */
 import type { Database } from '../db/database.js'
 import { randomToken, signJwt, verifyJwt, type JwtClaims } from '../jwt.js'
-import { TINBASE_VERSION, type Mailer, type RequestContext } from '../types.js'
+import { TINBASE_VERSION, type Mailer, type RequestContext, type SmsSender } from '../types.js'
 import { OAuthService, type OAuthProviderConfig } from './oauth.js'
 import { hashPassword, verifyPassword } from './password.js'
 import { qrSvgDataUri } from './qr.js'
@@ -14,6 +14,7 @@ import { htmlToText, renderTemplate, type EmailTemplateName, type EmailTemplates
 import { callSendEmailHook, type EmailActionType, type SendEmailHookConfig } from './send-email-hook.js'
 import { RateLimiter } from './rate-limit.js'
 import { generateTotpSecret, otpauthUri, verifyTotp } from './totp.js'
+import { DEFAULT_SMS_TEMPLATE, e164, normalizePhone, renderSmsTemplate } from './sms.js'
 
 /** Construction-time config for {@link AuthHandler}. */
 export interface AuthConfig {
@@ -48,6 +49,12 @@ export interface AuthConfig {
   sessionTimeboxSeconds?: number
   /** sends outgoing auth email (magic links, OTP codes, recovery) */
   mailer: Mailer
+  /** sends phone OTP codes (sign-in, signup confirmation, phone change) */
+  smsSender: SmsSender
+  /** `[auth.sms] template`; `{{ .Code }}` is the OTP. Default "Your code is {{ .Code }}". */
+  smsTemplate?: string
+  /** What `/settings` reports as `sms_provider` (twilio, or the dev inbox / a custom sender). */
+  smsProviderName?: string
   /**
    * Per-type HTML overrides from `[auth.email.template.*]`. A project that
    * supplies one decides for itself what the mail offers - link, code, both, or
@@ -107,11 +114,15 @@ interface UserRow {
   phone_confirmed_at: Date | string | null
   is_anonymous: boolean | null
   email_change: string | null
+  phone_change: string | null
 }
 
 function authError(status: number, errorCode: string, msg: string): Response {
   return json(status, { code: status, error_code: errorCode, msg })
 }
+
+/** The SMS provider refused or could not be reached; rendered as GoTrue's `sms_send_failed`. */
+class SmsSendFailed extends Error {}
 
 /**
  * The per-request inputs supabase-js attaches to an email-sending call.
@@ -125,7 +136,20 @@ function authError(status: number, errorCode: string, msg: string): Response {
  * The `auth.users` timestamp a flow measures `max_frequency` against, using
  * GoTrue's column for that flow. These are schema columns, never caller input.
  */
-type SentAtColumn = 'confirmation_sent_at' | 'recovery_sent_at' | 'email_change_sent_at' | 'reauthentication_sent_at'
+type SentAtColumn =
+  | 'confirmation_sent_at'
+  | 'recovery_sent_at'
+  | 'email_change_sent_at'
+  | 'reauthentication_sent_at'
+  | 'phone_change_sent_at'
+
+/**
+ * Who a one-time token was issued to. Exactly one side is set: a token is
+ * addressed to an email or to a phone number, and the queries scope on
+ * whichever it is. `null` on both means "unscoped", which only the
+ * unguessable link token may be.
+ */
+type TokenScope = { email: string | null; phone?: undefined } | { phone: string; email?: undefined }
 
 interface EmailFlowOptions {
   flavor?: 'login' | 'confirm' | 'invite'
@@ -206,6 +230,18 @@ function iso(v: Date | string | null): string | null {
   return v instanceof Date ? v.toISOString() : new Date(v).toISOString()
 }
 
+/**
+ * Whole seconds since a timestamp the database wrote, or null when it never
+ * was. Computed here rather than as `now() - column` in SQL: the subset engine
+ * (pg-mem) cannot subtract timestamps, and the server's clock is the one that
+ * wrote the column on every engine but an external Postgres.
+ */
+function secondsSince(v: Date | string | null | undefined): number | null {
+  if (v === null || v === undefined) return null
+  const at = v instanceof Date ? v.getTime() : new Date(v).getTime()
+  return Number.isFinite(at) ? Math.floor((Date.now() - at) / 1000) : null
+}
+
 /** Routes and services the GoTrue-compatible `/auth/v1/*` endpoints. */
 export class AuthHandler {
   private oauth: OAuthService
@@ -255,11 +291,11 @@ export class AuthHandler {
   }
 
   /** GoTrue's 429 for `max_frequency`, with the seconds the caller must wait. */
-  private static tooSoon(retryAfter: number): Response {
+  private static tooSoon(retryAfter: number, channel: 'email' | 'sms' = 'email'): Response {
     return new Response(
       JSON.stringify({
         code: 429,
-        error_code: 'over_email_send_rate_limit',
+        error_code: channel === 'sms' ? 'over_sms_send_rate_limit' : 'over_email_send_rate_limit',
         msg: `For security purposes, you can only request this after ${retryAfter} seconds.`,
       }),
       { status: 429, headers: { 'content-type': 'application/json; charset=utf-8', 'retry-after': String(retryAfter) } }
@@ -290,19 +326,16 @@ export class AuthHandler {
     if (!seconds || seconds <= 0) return null
     const normalized = email.toLowerCase().trim()
 
-    // `column` is one of the four literals in SentAtColumn, never caller input.
-    const res = await this.db.query(
-      `select extract(epoch from (now() - ${column}))::int as elapsed
-       from auth.users where email = $1`,
-      [normalized]
-    )
-    const row = res.rows[0] as { elapsed: number | null } | undefined
+    // `column` is one of the literals in SentAtColumn, never caller input.
+    const res = await this.db.query(`select ${column} as sent_at from auth.users where email = $1`, [normalized])
+    const row = res.rows[0] as { sent_at: Date | string | null } | undefined
 
     if (row) {
       // A row exists: the column is the authority, and it survives a restart,
       // which an in-memory counter does not.
-      if (row.elapsed !== null && row.elapsed < seconds) {
-        return AuthHandler.tooSoon(Math.max(1, seconds - row.elapsed))
+      const elapsed = secondsSince(row.sent_at)
+      if (elapsed !== null && elapsed < seconds) {
+        return AuthHandler.tooSoon(Math.max(1, seconds - elapsed))
       }
       return null
     }
@@ -341,13 +374,15 @@ export class AuthHandler {
         return json(200, {
           external: {
             email: true,
-            phone: false,
+            phone: this.settings.phoneEnabled,
             anonymous_users: this.settings.anonymousUsers,
             ...Object.fromEntries(providers.map((p) => [p, !this.settings.disabledProviders.includes(p)])),
           },
           disable_signup: this.settings.disableSignup,
           autoconfirm: this.settings.autoconfirm,
           mailer_autoconfirm: this.settings.autoconfirm,
+          phone_autoconfirm: this.settings.smsAutoconfirm,
+          sms_provider: this.settings.phoneEnabled ? (this.config.smsProviderName ?? '') : '',
           minimum_password_length: this.settings.minPasswordLength,
         })
       }
@@ -356,10 +391,12 @@ export class AuthHandler {
       if (path === 'user' && method === 'GET') return await this.getUser(req)
       if (path === 'user' && method === 'PUT') return await this.updateUser(req, url)
       if (path === 'logout' && method === 'POST') return await this.logout(req)
-      if (path === 'otp' && method === 'POST') return this.limit('otp', req) ?? (await this.sendOtp(req, url))
+      // /otp, /magiclink and /resend pick their limit (`otp` for mail, `sms`
+      // for a text) once the body says which, so they are rate-limited inside.
+      if (path === 'otp' && method === 'POST') return await this.sendOtp(req, url)
       if (path === 'recover' && method === 'POST') return this.limit('recover', req) ?? (await this.sendRecovery(req, url))
-      if (path === 'magiclink' && method === 'POST') return this.limit('otp', req) ?? (await this.sendOtp(req, url))
-      if (path === 'resend' && method === 'POST') return this.limit('otp', req) ?? (await this.resend(req, url))
+      if (path === 'magiclink' && method === 'POST') return await this.sendOtp(req, url)
+      if (path === 'resend' && method === 'POST') return await this.resend(req, url)
       if (path === 'verify' && method === 'POST') return this.limit('verify', req) ?? (await this.verifyToken(req))
       // Deliberately unlimited, unlike the POST above: a link carries no email,
       // so after the scoping guard in redeem() this path can only redeem the
@@ -386,6 +423,7 @@ export class AuthHandler {
       return authError(404, 'not_found', `unknown auth endpoint: ${path}`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
+      if (e instanceof SmsSendFailed) return authError(500, 'sms_send_failed', `Error sending sms OTP: ${msg}`)
       return authError(500, 'unexpected_failure', msg)
     }
   }
@@ -395,11 +433,14 @@ export class AuthHandler {
   private async signup(req: Request, url: URL): Promise<Response> {
     const body = (await req.json().catch(() => ({}))) as {
       email?: string
+      phone?: string
       password?: string
       data?: Record<string, unknown>
       code_challenge?: string
       code_challenge_method?: string
     }
+
+    if (body.phone && !body.email) return await this.signupWithPhone(req, body)
 
     if (!body.email && !body.password) {
       // supabase.auth.signInAnonymously()
@@ -484,15 +525,25 @@ export class AuthHandler {
     const body = (await req.json().catch(() => ({}))) as Record<string, string>
 
     if (grantType === 'password') {
+      // supabase.auth.signInWithPassword({ phone, password }): same grant, the
+      // account looked up by number instead of address.
+      const byPhone = !!body.phone && !body.email
       const email = (body.email ?? '').toLowerCase().trim()
-      const res = await this.db.query(`select * from auth.users where email = $1`, [email])
+      const phone = byPhone ? normalizePhone(body.phone ?? '') : null
+      if (byPhone && !this.settings.phoneEnabled) return AuthHandler.phoneDisabled()
+      const res = byPhone
+        ? await this.db.query(`select * from auth.users where phone = $1`, [phone ?? ''])
+        : await this.db.query(`select * from auth.users where email = $1`, [email])
       const user = res.rows[0] as UserRow | undefined
       if (!user || !user.encrypted_password || !(await verifyPassword(body.password ?? '', user.encrypted_password))) {
-        await this.audit('login_failed', { actorEmail: email, traits: { grant_type: 'password' } })
+        await this.audit('login_failed', { actorEmail: byPhone ? phone : email, traits: { grant_type: 'password' } })
         return authError(400, 'invalid_credentials', 'Invalid login credentials')
       }
       // when confirmation is required, unverified accounts cannot sign in yet
-      if (!this.settings.autoconfirm && !user.email_confirmed_at) {
+      if (byPhone && !this.settings.smsAutoconfirm && !user.phone_confirmed_at) {
+        return authError(400, 'phone_not_confirmed', 'Phone not confirmed')
+      }
+      if (!byPhone && !this.settings.autoconfirm && !user.email_confirmed_at) {
         return authError(400, 'email_not_confirmed', 'Email not confirmed')
       }
       await this.db.query(`update auth.users set last_sign_in_at = now() where id = $1`, [user.id])
@@ -550,6 +601,7 @@ export class AuthHandler {
     if (!user) return authError(401, 'no_authorization', 'Invalid or expired token')
     const body = (await req.json().catch(() => ({}))) as {
       email?: string
+      phone?: string
       password?: string
       data?: Record<string, unknown>
     }
@@ -559,6 +611,7 @@ export class AuthHandler {
     // usually a password) keeps the same id + data, flips is_anonymous off, and
     // records an email identity - matching supabase.auth.updateUser({ email }).
     const upgradingAnon = (user.is_anonymous ?? false) && !!body.email
+    const upgradingAnonByPhone = (user.is_anonymous ?? false) && !body.email && !!body.phone
 
     // Changing the address on an account that already has one is a different
     // operation from naming one for the first time, and only the first is an
@@ -578,6 +631,25 @@ export class AuthHandler {
         pendingEmail = email
       }
     }
+    // A phone change mirrors the email one: a new number on an account that
+    // already has one is parked until the texted code comes back (unless SMS
+    // autoconfirm is on), while an anonymous upgrade takes effect at once.
+    let pendingPhone: string | null = null
+    if (body.phone) {
+      if (!this.settings.phoneEnabled) return AuthHandler.phoneDisabled()
+      const phone = normalizePhone(body.phone)
+      if (!phone) return AuthHandler.invalidPhone()
+      const clash = await this.db.query(`select id from auth.users where phone = $1 and id <> $2`, [phone, user.id])
+      if (clash.rows.length > 0) {
+        return authError(422, 'phone_exists', 'A user with this phone number has already been registered')
+      }
+      if (upgradingAnonByPhone || this.settings.smsAutoconfirm || phone === user.phone) {
+        params.push(phone)
+        sets.push(`phone = $${params.length}, phone_confirmed_at = now()`)
+      } else {
+        pendingPhone = phone
+      }
+    }
     if (body.password) {
       if (body.password.length < this.settings.minPasswordLength) {
         return authError(422, 'weak_password', `Password should be at least ${this.settings.minPasswordLength} characters.`)
@@ -592,6 +664,10 @@ export class AuthHandler {
     if (upgradingAnon) {
       sets.push(`is_anonymous = false`)
       sets.push(`raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || '{"provider":"email","providers":["email"]}'::jsonb`)
+    }
+    if (upgradingAnonByPhone) {
+      sets.push(`is_anonymous = false`)
+      sets.push(`raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || '{"provider":"phone","providers":["phone"]}'::jsonb`)
     }
 
     let updated = user
@@ -613,8 +689,18 @@ export class AuthHandler {
       )
     }
 
+    if (upgradingAnonByPhone) {
+      await this.ensurePhoneIdentity(updated)
+    }
+
     if (pendingEmail) {
       const started = await this.startEmailChange(updated, pendingEmail, url.searchParams.get('redirect_to'))
+      if (started) return started
+      const res = await this.db.query(`select * from auth.users where id = $1`, [updated.id])
+      updated = (res.rows[0] as UserRow) ?? updated
+    }
+    if (pendingPhone) {
+      const started = await this.startPhoneChange(updated, pendingPhone)
       if (started) return started
       const res = await this.db.query(`select * from auth.users where id = $1`, [updated.id])
       updated = (res.rows[0] as UserRow) ?? updated
@@ -995,11 +1081,16 @@ export class AuthHandler {
   private async sendOtp(req: Request, url: URL): Promise<Response> {
     const body = (await req.json().catch(() => ({}))) as {
       email?: string
+      phone?: string
       create_user?: boolean
+      data?: Record<string, unknown>
       code_challenge?: string
       code_challenge_method?: string
     }
+    if (body.phone && !body.email) return await this.sendPhoneOtp(req, body)
     if (!body.email) return authError(400, 'validation_failed', 'email is required')
+    const limited = this.limit('otp', req)
+    if (limited) return limited
     const tooSoon = await this.limitEmailFrequency(body.email, 'recovery_sent_at')
     if (tooSoon) return tooSoon
     return this.issueToken(body.email, 'otp', body.create_user !== false, {
@@ -1032,7 +1123,7 @@ export class AuthHandler {
     }
     if (!body.type) return authError(400, 'validation_failed', 'Missing one of these arguments: type')
     if (body.type === 'sms' || body.type === 'phone_change') {
-      return authError(400, 'validation_failed', `Resend with type "${body.type}" requires phone auth, which is not supported`)
+      return await this.resendSms(req, body.type, body.phone)
     }
     if (body.type === 'email_change') {
       // The email-change flow itself does not exist yet, so there is no
@@ -1044,6 +1135,8 @@ export class AuthHandler {
       return authError(400, 'validation_failed', `Resend requires a valid type: ${body.type}`)
     }
     if (!body.email) return authError(400, 'validation_failed', 'email is required')
+    const limited = this.limit('otp', req)
+    if (limited) return limited
 
     const normalized = body.email.toLowerCase().trim()
     const res = await this.db.query(`select id, email_confirmed_at from auth.users where email = $1`, [normalized])
@@ -1088,50 +1181,61 @@ export class AuthHandler {
   /** Max wrong guesses for a one-time code before its tokens are invalidated. */
   private static readonly MAX_OTP_ATTEMPTS = 5
 
-  private async redeem(token: string, types: string[], email?: string): Promise<UserRow | null> {
+  private async redeem(token: string, types: string[], scope: TokenScope = { email: null }): Promise<UserRow | null> {
     // `|| null`, not `??`: an empty string is an absent address, not one to
     // match on. Left as '' it reaches the query as `email = ''`, which matches
     // nothing, and a client that sends `email: ''` beside a link token has a
     // good token refused.
-    const normalizedEmail = email?.toLowerCase().trim() || null
+    const byPhone = scope.phone !== undefined
+    const column = byPhone ? 'phone' : 'email'
+    const identifier = byPhone ? scope.phone : scope.email?.toLowerCase().trim() || null
     // SECURITY: a guessable code is only a credential together with the address
     // it was sent to. Unscoped, `token = $1` matches whoever happens to hold a
     // live code - so one guess is tried against every account at once - and the
     // attempt counter below needs the email to know what to count, so the
     // lockout never fires either. Refuse rather than widen the match.
-    if (!normalizedEmail && isGuessableToken(token)) return null
+    if (!identifier && isGuessableToken(token)) return null
+    // `column` is one of two literals chosen above, never caller input.
     const res = await this.db.query(
       `delete from auth.one_time_tokens
        where token = $1 and token_type = any($2::text[])
-         and ($3::text is null or email = $3) and expires_at > now()
+         and ($3::text is null or ${column} = $3) and expires_at > now()
          and attempts < $4
-       returning user_id, email`,
-      [token, `{${types.join(',')}}`, normalizedEmail, AuthHandler.MAX_OTP_ATTEMPTS]
+       returning user_id, email, phone`,
+      [token, `{${types.join(',')}}`, identifier, AuthHandler.MAX_OTP_ATTEMPTS]
     )
-    const row = res.rows[0] as { user_id: string; email: string } | undefined
+    const row = res.rows[0] as { user_id: string; email: string | null; phone: string | null } | undefined
     if (!row) {
       // Wrong/expired code: count the failed guess against the live tokens for
       // this email, and burn them once the attempt cap is hit (brute-force
       // lockout for the 6-digit OTP). Requires the email to scope the counter.
-      if (normalizedEmail) {
+      if (identifier) {
         await this.db.query(
           `update auth.one_time_tokens set attempts = attempts + 1
-           where email = $1 and token_type = any($2::text[]) and expires_at > now()`,
-          [normalizedEmail, `{${types.join(',')}}`]
+           where ${column} = $1 and token_type = any($2::text[]) and expires_at > now()`,
+          [identifier, `{${types.join(',')}}`]
         )
         await this.db.query(
-          `delete from auth.one_time_tokens where email = $1 and attempts >= $2`,
-          [normalizedEmail, AuthHandler.MAX_OTP_ATTEMPTS]
+          `delete from auth.one_time_tokens where ${column} = $1 and attempts >= $2`,
+          [identifier, AuthHandler.MAX_OTP_ATTEMPTS]
         )
       }
       return null
     }
-    await this.db.query(`delete from auth.one_time_tokens where email = $1`, [row.email])
-    const ures = await this.db.query(
-      `update auth.users set email_confirmed_at = coalesce(email_confirmed_at, now()), last_sign_in_at = now()
-       where id = $1 returning *`,
-      [row.user_id]
-    )
+    // Every other live token addressed the same way is spent with this one.
+    if (row.phone) await this.db.query(`delete from auth.one_time_tokens where phone = $1`, [row.phone])
+    else if (row.email) await this.db.query(`delete from auth.one_time_tokens where email = $1`, [row.email])
+    const ures = byPhone
+      ? await this.db.query(
+          `update auth.users set phone_confirmed_at = coalesce(phone_confirmed_at, now()), last_sign_in_at = now()
+           where id = $1 returning *`,
+          [row.user_id]
+        )
+      : await this.db.query(
+          `update auth.users set email_confirmed_at = coalesce(email_confirmed_at, now()), last_sign_in_at = now()
+           where id = $1 returning *`,
+          [row.user_id]
+        )
     return (ures.rows[0] as UserRow) ?? null
   }
 
@@ -1232,6 +1336,7 @@ export class AuthHandler {
     const body = (await req.json().catch(() => ({}))) as {
       type?: string
       email?: string
+      phone?: string
       token?: string
       token_hash?: string
     }
@@ -1241,13 +1346,16 @@ export class AuthHandler {
     // string here.
     const token = body.token ?? body.token_hash
     if (!token) return authError(400, 'validation_failed', 'token is required')
+    if (body.type === 'sms' || body.type === 'phone_change') {
+      return await this.verifySmsToken(body.type, body.phone, token)
+    }
     if (body.type === 'email_change') {
       const outcome = await this.verifyEmailChange(token)
       if (outcome.status === 'invalid') return authError(403, 'otp_expired', 'Token has expired or is invalid')
       if (outcome.status === 'pending') return json(200, { msg: AuthHandler.EMAIL_CHANGE_PENDING_MSG })
       return json(200, await this.sessionFor(outcome.user))
     }
-    const user = await this.redeem(token, AuthHandler.redeemTypes(body.type), body.email)
+    const user = await this.redeem(token, AuthHandler.redeemTypes(body.type), { email: body.email ?? null })
     if (!user) return authError(403, 'otp_expired', 'Token has expired or is invalid')
     // A PKCE challenge parked for the link is moot once the code was typed in
     // instead; drop it so nothing is left to redeem.
@@ -1329,6 +1437,270 @@ export class AuthHandler {
     return new Response(null, { status: 303, headers: { location: `${redirectTo}${hash}` } })
   }
 
+  // ── phone (SMS OTP) ───────────────────────────────────────────────────
+  //
+  // GoTrue's phone flows, on the same token table and the same attempt and
+  // expiry rules as email. The differences are what a text is: there is no
+  // link, only the code, so every phone token is a single guessable row scoped
+  // to its number; and each one costs money, so sending is paced by both the
+  // per-caller `sms` window and the per-recipient `max_frequency`.
+
+  /** GoTrue's answer to any phone endpoint while phone auth is off. */
+  private static phoneDisabled(): Response {
+    return authError(400, 'phone_provider_disabled', 'Unsupported phone provider')
+  }
+
+  private static invalidPhone(): Response {
+    return authError(400, 'validation_failed', 'Invalid phone number format (E.164 required)')
+  }
+
+  /**
+   * `[auth.sms] max_frequency`, measured like {@link limitEmailFrequency}:
+   * against the column that flow last wrote on the recipient's row, with an
+   * in-memory window for a number that has no row yet.
+   */
+  private async limitSmsFrequency(phone: string, column: SentAtColumn): Promise<Response | null> {
+    const seconds = this.settings.maxSmsFrequencySeconds
+    if (!seconds || seconds <= 0) return null
+    const res = await this.db.query(`select ${column} as sent_at from auth.users where phone = $1`, [phone])
+    const row = res.rows[0] as { sent_at: Date | string | null } | undefined
+    if (row) {
+      const elapsed = secondsSince(row.sent_at)
+      if (elapsed !== null && elapsed < seconds) {
+        return AuthHandler.tooSoon(Math.max(1, seconds - elapsed), 'sms')
+      }
+      return null
+    }
+    if (!this.rateLimiter) return null
+    const retryAfter = this.rateLimiter.check(`sms_frequency:${column}`, phone, Date.now(), {
+      limit: 1,
+      windowMs: seconds * 1000,
+    })
+    return retryAfter === null ? null : AuthHandler.tooSoon(retryAfter, 'sms')
+  }
+
+  /**
+   * Mint a code for `phone`, replacing any live one of the same type, and
+   * text it. The send column is written only once the provider accepted the
+   * message, as with mail. Returns the provider's message id when it gave one.
+   */
+  private async sendSmsCode(
+    user: UserRow,
+    phone: string,
+    tokenType: 'sms' | 'phone_change',
+    column: SentAtColumn
+  ): Promise<string | void> {
+    const code = randomOtp(this.settings.smsOtpLength)
+    await this.db.query(`delete from auth.one_time_tokens where phone = $1 and token_type = $2`, [phone, tokenType])
+    await this.db.query(
+      `insert into auth.one_time_tokens (user_id, phone, token_type, token, expires_at)
+       values ($1, $2, $3, $4, now() + $5::interval)`,
+      [user.id, phone, tokenType, code, `${this.settings.smsOtpExpirySeconds} seconds`]
+    )
+    const body = renderSmsTemplate(this.config.smsTemplate || DEFAULT_SMS_TEMPLATE, code)
+    let messageId: string | void
+    try {
+      messageId = await this.config.smsSender.send({ to: e164(phone), body })
+    } catch (e) {
+      // GoTrue's shape for a provider that refused the text (bad number, over
+      // the provider's limit, unreachable): the caller learns why, under the
+      // code supabase-js clients already handle, rather than a bare 500.
+      throw new SmsSendFailed(e instanceof Error ? e.message : String(e))
+    }
+    await this.markEmailSent(user.id, column)
+    return messageId ?? undefined
+  }
+
+  /** Create the account a phone OTP is for, with GoTrue's provider metadata. */
+  private async createPhoneUser(phone: string, data: Record<string, unknown> | undefined, extra: { password?: string | null; confirmed: boolean }): Promise<UserRow> {
+    const hashed = extra.password ? await hashPassword(extra.password) : null
+    const res = await this.db.query(
+      `insert into auth.users
+         (aud, role, phone, encrypted_password, phone_confirmed_at, last_sign_in_at,
+          raw_app_meta_data, raw_user_meta_data)
+       values ('authenticated', 'authenticated', $1, $2, case when $4 then now() else null end, now(),
+               '{"provider":"phone","providers":["phone"]}', $3)
+       returning *`,
+      [phone, hashed, JSON.stringify(data ?? {}), extra.confirmed]
+    )
+    const user = res.rows[0] as UserRow
+    await this.ensurePhoneIdentity(user)
+    return user
+  }
+
+  /** The `phone` identity GoTrue records, so `user.identities` names the provider. */
+  private async ensurePhoneIdentity(user: UserRow): Promise<void> {
+    await this.db.query(
+      `insert into auth.identities (user_id, provider, provider_id, identity_data)
+       values ($1, 'phone', $2, $3)
+       on conflict (provider, provider_id) do update
+         set identity_data = excluded.identity_data, updated_at = now()`,
+      [user.id, user.id, JSON.stringify({ sub: user.id, phone: user.phone })]
+    )
+  }
+
+  /** `supabase.auth.signUp({ phone, password })`. */
+  private async signupWithPhone(
+    req: Request,
+    body: { phone?: string; password?: string; data?: Record<string, unknown> }
+  ): Promise<Response> {
+    if (!this.settings.phoneEnabled) return AuthHandler.phoneDisabled()
+    if (this.settings.disableSignup) {
+      return authError(422, 'signup_disabled', 'Signups not allowed for this instance')
+    }
+    if (!body.password) {
+      return authError(400, 'validation_failed', 'Signup requires a valid phone number and password')
+    }
+    const phone = normalizePhone(body.phone ?? '')
+    if (!phone) return AuthHandler.invalidPhone()
+    if (body.password.length < this.settings.minPasswordLength) {
+      return authError(422, 'weak_password', `Password should be at least ${this.settings.minPasswordLength} characters.`)
+    }
+    const existing = await this.db.query(`select id from auth.users where phone = $1`, [phone])
+    if (existing.rows.length > 0) {
+      return authError(422, 'user_already_exists', 'User already registered')
+    }
+    const autoconfirm = this.settings.smsAutoconfirm
+    if (!autoconfirm) {
+      // The confirmation is a text, so it is paced like one - before the row
+      // is written, so a refusal leaves no half-made account behind.
+      const limited = this.limit('sms', req)
+      if (limited) return limited
+      const tooSoon = await this.limitSmsFrequency(phone, 'confirmation_sent_at')
+      if (tooSoon) return tooSoon
+    }
+    const user = await this.createPhoneUser(phone, body.data, { password: body.password, confirmed: autoconfirm })
+    await this.audit('user_signedup', { actorId: user.id, actorEmail: phone })
+    if (!autoconfirm) {
+      await this.sendSmsCode(user, phone, 'sms', 'confirmation_sent_at')
+      return json(200, this.userJson(user))
+    }
+    return json(200, await this.sessionFor(user))
+  }
+
+  /** `supabase.auth.signInWithOtp({ phone })`: text a code, creating the account unless told not to. */
+  private async sendPhoneOtp(
+    req: Request,
+    body: { phone?: string; create_user?: boolean; data?: Record<string, unknown> }
+  ): Promise<Response> {
+    if (!this.settings.phoneEnabled) return AuthHandler.phoneDisabled()
+    const phone = normalizePhone(body.phone ?? '')
+    if (!phone) return AuthHandler.invalidPhone()
+    const limited = this.limit('sms', req)
+    if (limited) return limited
+    const tooSoon = await this.limitSmsFrequency(phone, 'confirmation_sent_at')
+    if (tooSoon) return tooSoon
+
+    const res = await this.db.query(`select * from auth.users where phone = $1`, [phone])
+    let user = res.rows[0] as UserRow | undefined
+    if (!user) {
+      if (body.create_user === false) return authError(422, 'otp_disabled', 'Signups not allowed for otp')
+      if (this.settings.disableSignup) {
+        return authError(422, 'signup_disabled', 'Signups not allowed for this instance')
+      }
+      user = await this.createPhoneUser(phone, body.data, { confirmed: false })
+    }
+    const messageId = await this.sendSmsCode(user, phone, 'sms', 'confirmation_sent_at')
+    return json(200, messageId ? { message_id: messageId } : {})
+  }
+
+  /**
+   * `supabase.auth.resend({ phone, type: 'sms' | 'phone_change' })`.
+   *
+   * Like the email resend: 200 and no text for a number with nothing pending,
+   * whether because it has no account, is already confirmed, or has no change
+   * under way - so the endpoint cannot be used to find out which.
+   */
+  private async resendSms(req: Request, type: 'sms' | 'phone_change', rawPhone: string | undefined): Promise<Response> {
+    if (!this.settings.phoneEnabled) return AuthHandler.phoneDisabled()
+    if (!rawPhone) return authError(400, 'validation_failed', 'phone is required')
+    const phone = normalizePhone(rawPhone)
+    if (!phone) return AuthHandler.invalidPhone()
+    const limited = this.limit('sms', req)
+    if (limited) return limited
+
+    if (type === 'sms') {
+      const res = await this.db.query(`select * from auth.users where phone = $1`, [phone])
+      const user = res.rows[0] as UserRow | undefined
+      if (!user || user.phone_confirmed_at) return json(200, {})
+      const tooSoon = await this.limitSmsFrequency(phone, 'confirmation_sent_at')
+      if (tooSoon) return tooSoon
+      const messageId = await this.sendSmsCode(user, phone, 'sms', 'confirmation_sent_at')
+      return json(200, messageId ? { message_id: messageId } : {})
+    }
+
+    // phone_change: the number given is the new one, which is where the code goes.
+    const res = await this.db.query(`select * from auth.users where phone_change = $1`, [phone])
+    const user = res.rows[0] as UserRow | undefined
+    if (!user) return json(200, {})
+    const tooSoon = await this.limitPhoneChangeFrequency(user, phone)
+    if (tooSoon) return tooSoon
+    const messageId = await this.sendSmsCode(user, phone, 'phone_change', 'phone_change_sent_at')
+    return json(200, messageId ? { message_id: messageId } : {})
+  }
+
+  /**
+   * `max_frequency` for a phone change: the account's own `phone_change_sent_at`
+   * (the new number has no row to measure by), plus the in-memory window on
+   * the new number itself so one account cannot be used to text it in a loop.
+   */
+  private async limitPhoneChangeFrequency(user: UserRow, newPhone: string): Promise<Response | null> {
+    const seconds = this.settings.maxSmsFrequencySeconds
+    if (!seconds || seconds <= 0) return null
+    const res = await this.db.query(`select phone_change_sent_at as sent_at from auth.users where id = $1`, [user.id])
+    const elapsed = secondsSince((res.rows[0] as { sent_at: Date | string | null } | undefined)?.sent_at)
+    if (elapsed !== null && elapsed < seconds) return AuthHandler.tooSoon(Math.max(1, seconds - elapsed), 'sms')
+    return this.limitSmsFrequency(newPhone, 'phone_change_sent_at')
+  }
+
+  /**
+   * Begin a phone change: park the new number and text it a code. The number
+   * moves only when the code comes back through `/verify` type `phone_change`.
+   * Returns a Response only when the change could not be started.
+   */
+  private async startPhoneChange(user: UserRow, newPhone: string): Promise<Response | null> {
+    const tooSoon = await this.limitPhoneChangeFrequency(user, newPhone)
+    if (tooSoon) return tooSoon
+    await this.db.query(
+      `update auth.users set phone_change = $2, phone_change_sent_at = now(), updated_at = now() where id = $1`,
+      [user.id, newPhone]
+    )
+    // A second change replaces the first outright.
+    await this.db.query(`delete from auth.one_time_tokens where user_id = $1 and token_type = 'phone_change'`, [user.id])
+    await this.sendSmsCode(user, newPhone, 'phone_change', 'phone_change_sent_at')
+    return null
+  }
+
+  /** `verifyOtp({ phone, token, type: 'sms' | 'phone_change' })` → session. */
+  private async verifySmsToken(type: 'sms' | 'phone_change', rawPhone: string | undefined, token: string): Promise<Response> {
+    if (!rawPhone) return authError(400, 'validation_failed', 'phone is required')
+    const phone = normalizePhone(rawPhone)
+    if (!phone) return AuthHandler.invalidPhone()
+    const user = await this.redeem(token, [type], { phone })
+    if (!user) return authError(403, 'otp_expired', 'Token has expired or is invalid')
+    if (type === 'sms') {
+      await this.audit('login', { actorId: user.id, actorEmail: user.email || phone, traits: { provider: 'phone' } })
+      return json(200, await this.sessionFor(user))
+    }
+    // phone_change: the code came back from the new number, so it moves in.
+    // `nullif` guards a pending number cleared in between: better to keep the
+    // number already held than to blank it.
+    const done = await this.db.query(
+      `update auth.users
+          set phone = coalesce(nullif(phone_change, ''), phone),
+              phone_confirmed_at = now(),
+              phone_change = '',
+              phone_change_token = '',
+              updated_at = now()
+        where id = $1
+        returning *`,
+      [user.id]
+    )
+    const moved = (done.rows[0] as UserRow | undefined) ?? user
+    await this.ensurePhoneIdentity(moved)
+    return json(200, await this.sessionFor(moved))
+  }
+
   // ── admin ─────────────────────────────────────────────────────────────
 
   private async admin(req: Request, ctx: RequestContext, path: string, method: string): Promise<Response> {
@@ -1357,23 +1729,34 @@ export class AuthHandler {
     if (path === 'admin/users' && method === 'POST') {
       const body = (await req.json().catch(() => ({}))) as {
         email?: string
+        phone?: string
         password?: string
         email_confirm?: boolean
+        phone_confirm?: boolean
         user_metadata?: Record<string, unknown>
         app_metadata?: Record<string, unknown>
       }
-      if (!body.email) return authError(400, 'validation_failed', 'email is required')
+      if (!body.email && !body.phone) return authError(400, 'validation_failed', 'email or phone is required')
+      const phone = body.phone ? normalizePhone(body.phone) : null
+      if (body.phone && !phone) return AuthHandler.invalidPhone()
       const hashed = body.password ? await hashPassword(body.password) : null
+      // The first provider named is the primary one, as GoTrue records it.
+      const provider = body.email ? 'email' : 'phone'
+      const providers = [...(body.email ? ['email'] : []), ...(phone ? ['phone'] : [])]
       const res = await this.db.query(
         `insert into auth.users
-           (aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data)
-         values ('authenticated', 'authenticated', $1, $2, case when $3 then now() else null end, $4, $5)
+           (aud, role, email, phone, encrypted_password, email_confirmed_at, phone_confirmed_at,
+            raw_app_meta_data, raw_user_meta_data)
+         values ('authenticated', 'authenticated', $1, $2, $3,
+                 case when $4 then now() else null end, case when $5 then now() else null end, $6, $7)
          returning *`,
         [
-          body.email.toLowerCase().trim(),
+          body.email ? body.email.toLowerCase().trim() : null,
+          phone,
           hashed,
-          body.email_confirm ?? true,
-          JSON.stringify({ provider: 'email', providers: ['email'], ...(body.app_metadata ?? {}) }),
+          !!body.email && (body.email_confirm ?? true),
+          !!phone && (body.phone_confirm ?? true),
+          JSON.stringify({ provider, providers, ...(body.app_metadata ?? {}) }),
           JSON.stringify(body.user_metadata ?? {}),
         ]
       )
@@ -1392,6 +1775,12 @@ export class AuthHandler {
         params.push(body.email.toLowerCase().trim())
         sets.push(`email = $${params.length}`)
       }
+      if (typeof body.phone === 'string') {
+        const phone = normalizePhone(body.phone)
+        if (!phone) return AuthHandler.invalidPhone()
+        params.push(phone)
+        sets.push(`phone = $${params.length}`)
+      }
       if (typeof body.password === 'string') {
         params.push(await hashPassword(body.password))
         sets.push(`encrypted_password = $${params.length}`)
@@ -1405,6 +1794,7 @@ export class AuthHandler {
         sets.push(`raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || $${params.length}::jsonb`)
       }
       if (body.email_confirm === true) sets.push(`email_confirmed_at = now()`)
+      if (body.phone_confirm === true) sets.push(`phone_confirmed_at = now()`)
       if (sets.length === 0) return authError(400, 'validation_failed', 'nothing to update')
       params.push(idMatch[1])
       const res = await this.db.query(
@@ -1971,7 +2361,11 @@ export class AuthHandler {
       new_email: u.email_change || undefined,
       email_confirmed_at: iso(u.email_confirmed_at),
       phone: u.phone ?? '',
-      confirmed_at: iso(u.email_confirmed_at),
+      new_phone: u.phone_change || undefined,
+      phone_confirmed_at: iso(u.phone_confirmed_at),
+      // GoTrue: the earlier of the two confirmations; an account confirmed by
+      // either channel is confirmed.
+      confirmed_at: iso(u.email_confirmed_at ?? u.phone_confirmed_at),
       last_sign_in_at: iso(u.last_sign_in_at),
       app_metadata: u.raw_app_meta_data ?? {},
       user_metadata: u.raw_user_meta_data ?? {},

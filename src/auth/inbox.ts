@@ -9,7 +9,7 @@
  * no auth, exactly like Inbucket. Not for production - provide your own
  * `mailer` there and no inbox is mounted.
  */
-import type { MailMessage, Mailer } from '../types.js'
+import type { MailMessage, Mailer, SmsMessage } from '../types.js'
 
 /** A captured message plus the link/code extracted from its body for the inbox UI. */
 export interface InboxEntry extends MailMessage {
@@ -17,29 +17,50 @@ export interface InboxEntry extends MailMessage {
   created_at: string
   /** first URL found in the body (the magic/confirm/recovery link), if any */
   link: string | null
-  /** first 6-digit code found in the body (the OTP), if any */
+  /** first 6-10 digit code found in the body (the OTP), if any */
   code: string | null
+  /** how it would have been delivered: an email, or a text to a phone number */
+  channel: 'email' | 'sms'
 }
 
 const CAP = 200
 
-/** In-memory {@link Mailer} that captures the most recent {@link CAP} messages and serves the /inbox UI. */
+/**
+ * In-memory {@link Mailer} that captures the most recent {@link CAP} messages
+ * and serves the /inbox UI. Texts ({@link sendSms}, the SMS fallback) land in
+ * the same list as mail: locally there is no phone to deliver to, and the code
+ * is what a developer is after either way.
+ */
 export class InboxMailer implements Mailer {
   private messages: InboxEntry[] = []
 
   /** `passthrough` still receives every message (e.g. to also log to console). */
-  constructor(private passthrough?: (msg: MailMessage) => void) {}
+  constructor(
+    private passthrough?: (msg: MailMessage) => void,
+    private smsPassthrough?: (msg: SmsMessage) => void
+  ) {}
 
   async send(msg: MailMessage): Promise<void> {
+    this.capture(msg, 'email')
+    this.passthrough?.(msg)
+  }
+
+  /** Capture a text as the SMS fallback. The number is the `to`, the body the `text`. */
+  async sendSms(msg: SmsMessage): Promise<void> {
+    this.capture({ to: msg.to, subject: 'SMS', text: msg.body }, 'sms')
+    this.smsPassthrough?.(msg)
+  }
+
+  private capture(msg: MailMessage, channel: 'email' | 'sms'): void {
     this.messages.unshift({
       ...msg,
       id: crypto.randomUUID(),
       created_at: new Date().toISOString(),
       link: msg.text.match(/https?:\/\/\S+/)?.[0] ?? null,
-      code: msg.text.match(/\b\d{6}\b/)?.[0] ?? null,
+      code: msg.text.match(/\b\d{6,10}\b/)?.[0] ?? null,
+      channel,
     })
     if (this.messages.length > CAP) this.messages.length = CAP
-    this.passthrough?.(msg)
   }
 
   list(): InboxEntry[] {
@@ -104,7 +125,7 @@ const INBOX_HTML = `<!doctype html>
 <header>
   <div>
     <h1>tinbase <span class="dot">·</span> Inbox</h1>
-    <div class="muted">Captured auth emails — local dev only</div>
+    <div class="muted">Captured auth emails and texts — local dev only</div>
   </div>
   <div style="display:flex;gap:8px">
     <button id="refresh">Refresh</button>
@@ -118,13 +139,14 @@ const INBOX_HTML = `<!doctype html>
   async function load() {
     const res = await fetch('/inbox/api/messages')
     const { messages } = await res.json()
-    if (!messages.length) { list.innerHTML = '<div class="empty">No emails yet. Trigger a magic link, OTP, or password reset.</div>'; return }
+    if (!messages.length) { list.innerHTML = '<div class="empty">No messages yet. Trigger a magic link, OTP, password reset, or phone sign-in.</div>'; return }
     list.innerHTML = messages.map((m) => {
       const when = new Date(m.created_at).toLocaleTimeString()
       const code = m.code ? '<span class="code">' + esc(m.code) + '</span>' : ''
       const link = m.link ? '<a class="link" href="' + esc(m.link) + '" target="_blank" rel="noreferrer">Open link →</a>' : ''
       const actions = (code || link) ? '<div class="actions">' + code + link + '</div>' : ''
-      return '<div class="msg"><div class="top"><span class="subject">' + esc(m.subject) + '</span><span class="time">' + esc(when) + '</span></div>' +
+      const subject = m.channel === 'sms' ? 'SMS' : m.subject
+      return '<div class="msg"><div class="top"><span class="subject">' + esc(subject) + '</span><span class="time">' + esc(when) + '</span></div>' +
         '<div class="to">to ' + esc(m.to) + '</div><div class="body">' + esc(m.text) + '</div>' + actions + '</div>'
     }).join('')
   }

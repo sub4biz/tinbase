@@ -22,6 +22,9 @@ export const DEFAULT_AUTH_RATE_LIMITS: Record<string, RateLimitRule> = {
   // Endpoints that send email (OTP, magic link, recovery): mail-flood surface.
   otp: { limit: 10, windowMs: 60 * 60 * 1000 },
   recover: { limit: 10, windowMs: 60 * 60 * 1000 },
+  // Endpoints that send a text (phone OTP, phone signup, phone change): each
+  // one costs money, so the window is GoTrue's `sms_sent` default.
+  sms: { limit: 30, windowMs: 60 * 60 * 1000 },
   // Redeeming a code is the same brute-force surface as a password grant: a
   // short OTP is only a few hundred thousand guesses, and the per-address
   // lockout cannot see an attacker who spreads guesses across addresses.

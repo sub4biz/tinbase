@@ -142,6 +142,16 @@ export interface AuthSettings {
   autoconfirm: boolean
   minPasswordLength: number
   disabledProviders: string[]
+  /** phone sign-ins ([auth.sms] enable_signup) */
+  phoneEnabled: boolean
+  /** confirm phone numbers automatically on signup (inverse of [auth.sms] enable_confirmations) */
+  smsAutoconfirm: boolean
+  smsOtpLength: number
+  smsOtpExpirySeconds: number
+  maxSmsFrequencySeconds: number
+  /** [auth.sms.twilio]; authToken is never echoed back (always '' on read; see smsTwilioAuthTokenSet) */
+  smsTwilio: { accountSid: string; authToken: string; messageServiceSid: string }
+  smsTwilioAuthTokenSet?: boolean
 }
 
 export const api = {
@@ -214,6 +224,8 @@ export const api = {
     req('/admin/v1/auth-config').then(jsonOrThrow) as Promise<{
       providers: string[]
       inbox: boolean
+      /** SMS delivery: a custom sender from createBackend, and the Twilio-compatible API the built-in provider posts to */
+      sms?: { custom: boolean; apiUrl: string }
       settings: AuthSettings | null
     }>,
   updateAuthSettings: (patch: Partial<AuthSettings>) =>

@@ -6,6 +6,42 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.21.0]
+
+### Added
+
+- Phone auth (SMS OTP), to GoTrue parity: `POST /otp { phone }`, `POST /verify { type: "sms" }`,
+  `POST /signup { phone, password }` (a session under SMS autoconfirm, otherwise a texted code
+  first), `POST /token?grant_type=password { phone, password }`, `PUT /user { phone }` (a phone
+  change confirmed with `type: "phone_change"`, or applied at once under autoconfirm), `POST
+  /resend { type: "sms" | "phone_change" }`, admin `createUser({ phone, phone_confirm })`, and
+  `/settings` reporting `external.phone`, `phone_autoconfirm` and `sms_provider`. Numbers are
+  validated as E.164 and stored as bare digits, as GoTrue stores them; a `phone` identity is
+  recorded; `confirmed_at` is whichever of email or phone confirmed first.
+- Supabase's `[auth.sms]` (`enable_signup`, `enable_confirmations`, `otp_length`, `otp_expiry`,
+  `max_frequency`, `template`) and `[auth.sms.twilio]` (`enabled`, `account_sid`, `auth_token`,
+  `message_service_sid`) in config.toml, plus `api_url` for a Twilio-compatible gateway. Any field
+  left empty is filled from `TINBASE_SMS_TWILIO_ACCOUNT_SID` / `_AUTH_TOKEN` /
+  `_MESSAGE_SERVICE_SID` / `_API_URL`. `[auth.rate_limit] sms_sent` sets the per-caller window
+  (default 30/hour); `max_frequency` paces each number and answers 429
+  `over_sms_send_rate_limit`.
+- A `TwilioSmsSender` (one form-encoded POST to the Messages API, no SDK) and an `SmsSender`
+  interface on `createBackend({ smsSender })`, the phone counterpart of `mailer`. Without a
+  provider the texts are captured in the dev inbox at `/inbox`, marked `channel: "sms"`. A provider
+  refusal answers GoTrue's 500 `sms_send_failed` with the provider's reason.
+- Runtime settings for the above (`phoneEnabled`, `smsAutoconfirm`, `smsOtpLength`,
+  `smsOtpExpirySeconds`, `maxSmsFrequencySeconds`, `smsTwilio`) through `PATCH
+  /admin/v1/auth-config`, and a Phone section on Studio's Sign In / Providers page. The Twilio auth
+  token is write-only: the API reports only whether one is set, and a credential supplied through
+  config.toml or the environment is never copied into the persisted settings row, so a rotated
+  platform key takes effect on restart.
+- `maxEmailFrequencySeconds` is now patchable at runtime too.
+
+### Changed
+
+- `auth.one_time_tokens.email` is nullable and the table gains a `phone` column; existing
+  databases are upgraded at start.
+
 ## [0.20.0]
 
 ### Added

@@ -113,6 +113,28 @@ export interface BackendConfig {
   /** Mail transport for OTP/magic-link/recovery emails. Default: console logger. */
   mailer?: Mailer
   /**
+   * SMS transport for phone OTP codes (`signInWithOtp({ phone })`, phone
+   * signup confirmation, phone change). Default: the Twilio provider when
+   * `authSettings.smsTwilio` carries credentials (config.toml
+   * `[auth.sms.twilio]`, `TINBASE_SMS_TWILIO_*`), otherwise the dev inbox.
+   */
+  smsSender?: SmsSender
+  /**
+   * Base URL of the Twilio-compatible API the built-in provider posts to
+   * (config.toml `[auth.sms.twilio] api_url`, `TINBASE_SMS_TWILIO_API_URL`).
+   * Default https://api.twilio.com. A platform points it at its own gateway,
+   * which holds the real Twilio credential and meters each tenant - the same
+   * idea as `TINBASE_RESEND_ENDPOINT`.
+   */
+  smsApiUrl?: string
+  /** Injectable fetch for the built-in Twilio provider (tests capture the request). */
+  smsFetch?: typeof fetch
+  /**
+   * The SMS body, GoTrue's `[auth.sms] template`: `{{ .Code }}` is the OTP.
+   * Default "Your code is {{ .Code }}".
+   */
+  smsTemplate?: string
+  /**
    * Per-type auth email bodies (config.toml `[auth.email.template.*]`), as
    * GoTrue templates. A project decides what its mail offers - link, code, or a
    * link straight to its own page - by which `{{ .Variable }}` it uses. Types
@@ -194,6 +216,24 @@ export interface Mailer {
   send(msg: MailMessage): Promise<void>
 }
 
+/** An outbound text message: a phone OTP for sign-in, signup confirmation or phone change. */
+export interface SmsMessage {
+  /** E.164 with the leading `+`, e.g. `+15005550006`. */
+  to: string
+  /** The rendered body. Carries the OTP, so it is not logged by default. */
+  body: string
+}
+
+/**
+ * Pluggable SMS transport, the phone counterpart of {@link Mailer}. The
+ * built-in implementation speaks Twilio's Messages API; the dev fallback
+ * captures messages in the local inbox.
+ */
+export interface SmsSender {
+  /** Deliver one message. May return the provider's message id. */
+  send(msg: SmsMessage): Promise<string | void>
+}
+
 /**
  * The public Supabase local-dev JWT secret. Used when no `jwtSecret` is set so
  * default keys match a stock `supabase start`.
@@ -214,7 +254,7 @@ export const DEFAULT_JWT_SECRET = 'super-secret-jwt-token-with-at-least-32-chara
  * package.json` in test/version.test.ts now fails the moment the two diverge, so
  * a release cannot quietly ship the wrong number again.
  */
-export const TINBASE_VERSION = '0.20.0'
+export const TINBASE_VERSION = '0.21.0'
 
 /** Per-request execution context derived from apikey/Authorization headers. */
 export interface RequestContext {
