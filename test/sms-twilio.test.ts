@@ -145,6 +145,9 @@ describe('the backend sends through Twilio from the runtime settings', () => {
     const body = (await raw.json()) as { error_code: string; msg: string }
     expect(body.error_code).toBe('sms_send_failed')
     expect(body.msg).toMatch(/^Error sending sms OTP: .*Too Many Requests/)
+    // and the code minted for the failed send is gone: nothing a guess could redeem
+    const left = await backend.db.query(`select count(*)::int as n from auth.one_time_tokens where token_type = 'sms'`)
+    expect((left.rows[0] as { n: number }).n).toBe(0)
     expect(backend.logs.list(500).some((l) => l.msg.startsWith('[sms] FAILED to=+15005550006'))).toBe(true)
     // the text never went out, so max_frequency has nothing to measure from
     const again = await supabase.auth.signInWithOtp({ phone: '+15005550006' })
