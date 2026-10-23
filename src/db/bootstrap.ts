@@ -31,6 +31,20 @@ create table if not exists auth.users (
   updated_at timestamptz default now(),
   phone text unique,
   phone_confirmed_at timestamptz,
+  phone_change text default '',
+  phone_change_token text default '',
+  phone_change_sent_at timestamptz,
+  -- the send timestamps max_frequency is measured against, and the pending
+  -- email change, which the auth flows write on every engine
+  confirmation_sent_at timestamptz,
+  recovery_sent_at timestamptz,
+  email_change text default '',
+  email_change_token_new text default '',
+  email_change_token_current text default '',
+  email_change_confirm_status smallint default 0,
+  email_change_sent_at timestamptz,
+  reauthentication_sent_at timestamptz,
+  invited_at timestamptz,
   banned_until timestamptz,
   deleted_at timestamptz,
   is_anonymous boolean default false
@@ -61,13 +75,18 @@ create table if not exists auth.sessions (
 create table if not exists auth.one_time_tokens (
   id uuid primary key default gen_random_uuid(),
   user_id uuid,
-  email text not null,
+  email text,
+  phone text,
   token_type text not null,
   token text not null,
   attempts int not null default 0,
   created_at timestamptz default now(),
   expires_at timestamptz not null
 );
+-- Databases created before phone auth (< 0.21.0) have the table without the
+-- phone column and with email NOT NULL. Idempotent on a fresh database.
+alter table auth.one_time_tokens add column if not exists phone text;
+alter table auth.one_time_tokens alter column email drop not null;
 
 create table if not exists auth.identities (
   id uuid primary key default gen_random_uuid(),
@@ -320,16 +339,24 @@ create table if not exists auth.sessions (
 
 create index if not exists sessions_user_id_idx on auth.sessions(user_id);
 
+-- A token is addressed to an email OR a phone number; the other column is
+-- null. Both nullable because a row needs exactly one, which a NOT NULL on
+-- either cannot say.
 create table if not exists auth.one_time_tokens (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references auth.users(id) on delete cascade,
-  email text not null,
-  token_type text not null, -- otp | magiclink | recovery
+  email text,
+  phone text,
+  token_type text not null, -- otp | magiclink | recovery | email_change_* | sms | phone_change
   token text not null,
   attempts int not null default 0,
   created_at timestamptz default now(),
   expires_at timestamptz not null
 );
+-- Databases created before phone auth (< 0.21.0) have the table without the
+-- phone column and with email NOT NULL. Idempotent on a fresh database.
+alter table auth.one_time_tokens add column if not exists phone text;
+alter table auth.one_time_tokens alter column email drop not null;
 
 create table if not exists auth.identities (
   id uuid primary key default gen_random_uuid(),

@@ -131,7 +131,7 @@ const server = await serve(backend, { port: 54321 })
 | Service | Endpoint | Coverage |
 | --- | --- | --- |
 | REST (PostgREST) | `/rest/v1` | select with embedded resources (to-one, to-many, many-to-many via junction, nested, `!inner`, aliases, hints, casts, JSON paths), all common filter operators incl. `or`/`and` trees, full-text search, order/limit/offset (top-level and per-embed), `single`/`maybeSingle`, `count`, insert/bulk insert, upsert (merge/ignore), update, delete, `Prefer` handling, RPC (scalar, `setof`, void, filters on results), PostgREST-shaped errors |
-| Auth (GoTrue) | `/auth/v1` | email/password signup + sign-in, anonymous sign-in, session refresh with rotation, `getUser`, `updateUser`, sign-out, admin user CRUD (service key), GoTrue-shaped errors. JWTs are HS256 via WebCrypto; passwords are PBKDF2 |
+| Auth (GoTrue) | `/auth/v1` | email/password signup + sign-in, anonymous sign-in, email OTP / magic links / recovery, phone (SMS OTP) sign-in, signup and phone change through Supabase's `[auth.sms.twilio]` provider, session refresh with rotation, `getUser`, `updateUser`, sign-out, admin user CRUD (service key), GoTrue-shaped errors. JWTs are HS256 via WebCrypto; passwords are PBKDF2 |
 | Storage | `/storage/v1` | bucket CRUD, upload (raw + multipart), download, public objects, signed URLs, signed upload URLs, list with folder entries, move/copy, remove, size/MIME limits, a project-wide storage quota. Metadata lives in `storage.objects` with RLS enforced; bytes go through a pluggable driver (fs in Node, memory anywhere) |
 | Edge Functions | `/functions/v1` | `supabase.functions.invoke()` - Supabase-style `Deno.serve(handler)` functions (with `Deno.env`) run unchanged, as do `export default` handlers; loaded from `supabase/functions/<name>/index.{ts,js,mjs}` by the CLI or passed via `createBackend({ functions })`. Web-API functions work as-is; `npm:`/`jsr:`/URL imports still need bundling |
 | Queues (pgmq) | `pgmq.*` | Message queues via a pure-SQL pgmq subset (create/send/read/pop/delete/archive, visibility timeouts). Call from SQL or `supabase.schema('pgmq').rpc(...)`. No extension |
@@ -140,6 +140,39 @@ const server = await serve(backend, { port: 54321 })
 | Database Webhooks | config | Fire HTTP requests on table INSERT/UPDATE/DELETE with Supabase's exact payload (`type`/`table`/`schema`/`record`/`old_record`). Configured via `createBackend({ webhooks })`, `backend.webhooks.register()`, or `supabase/webhooks.json`. Built on the CDC pipeline — no extension needed |
 | Studio (Admin UI) | `/_/` | A Supabase-Studio-style dashboard (React + Radix + Tailwind) with real URL routing and a command palette: table editor (filters, sorting, inline type-aware editing, FK navigation, RLS + role preview), database section (schema visualizer, tables, functions, triggers, enums, indexes, migrations, policies, roles), authentication, storage, edge functions, realtime, automations (cron/queues/webhooks), logs, SQL editor, settings, and a live Advisor. One self-contained HTML file (works in the single binary); log in with the service_role key |
 | Realtime | `/realtime/v1` | Phoenix protocol (v1 JSON and v2 array/binary serializers), `postgres_changes` (INSERT/UPDATE/DELETE, filters) fed by triggers + `pg_notify`, broadcast (incl. binary payloads), presence. WebSocket server is a ~150-line RFC 6455 implementation - no `ws` dependency |
+
+### Phone auth (SMS OTP)
+
+`signInWithOtp({ phone })`, `verifyOtp({ phone, token, type: 'sms' })`, `signUp({ phone, password })`,
+`updateUser({ phone })` (confirmed with `type: 'phone_change'`) and `resend({ phone, type: 'sms' })`
+work as they do against Supabase. Phone auth is off until the project turns it on, with the same
+`supabase/config.toml` Supabase uses:
+
+```toml
+[auth.sms]
+enable_signup = true          # phone sign-ins and signups
+enable_confirmations = false  # true: a phone signup must verify its code before it can sign in
+max_frequency = "60s"         # shortest gap between texts to one number
+template = "Your code is {{ .Code }}"
+
+[auth.sms.twilio]
+enabled = true
+account_sid = "ACxxxxxxxx"
+message_service_sid = "MGxxxxxxxx"
+auth_token = "env(TWILIO_AUTH_TOKEN)"
+```
+
+The provider is Twilio's Messages API, called directly (no SDK). Any field left empty is filled from
+`TINBASE_SMS_TWILIO_ACCOUNT_SID` / `_AUTH_TOKEN` / `_MESSAGE_SERVICE_SID`, which is how a platform
+configures its tenants' containers; `api_url` (or `TINBASE_SMS_TWILIO_API_URL`) points the same
+request at a Twilio-compatible gateway that holds the real credential. Without credentials the
+texts are captured in the dev inbox at `/inbox` next to the emails. Studio's Sign In / Providers
+page has the same switches and fields; the auth token is never shown back. Embedders pass their own
+`smsSender` to `createBackend`, as with `mailer`.
+
+Codes are 6 digits (`[auth.sms] otp_length`), expire after 60 s (`otp_expiry`), lock after five wrong
+guesses, and every send is paced per caller (`[auth.rate_limit] sms_sent`, default 30/hour) and per
+recipient (`max_frequency`). Twilio Verify, the `send_sms` hook and WhatsApp are not implemented.
 
 ### RLS works like real Supabase
 
@@ -262,13 +295,13 @@ Rough coverage of the supabase-js SDK surface, measured against what each sub-li
 
 **Overall: roughly 80% of the supabase-js SDK surface - and ~90% of what a typical CRUD + auth + storage + realtime app actually calls.**
 
-Beyond the client SDK, the local platform features real projects depend on also work: **type generation**, **RLS** (enforced on REST, Storage, and realtime), **database webhooks**, **cron**, **queues (pgmq)**, a **Supabase-Studio-parity dashboard** (table editor, database catalog, auth/storage/edge-functions/realtime/automations management, SQL editor, and a live Advisor), and Supabase-CLI migration conventions (`db reset` / `db diff`). The remaining gaps are OAuth logins' provider variety, phone auth/MFA polish, and pgvector (needs an extension binary).
+Beyond the client SDK, the local platform features real projects depend on also work: **type generation**, **RLS** (enforced on REST, Storage, and realtime), **database webhooks**, **cron**, **queues (pgmq)**, a **Supabase-Studio-parity dashboard** (table editor, database catalog, auth/storage/edge-functions/realtime/automations management, SQL editor, and a live Advisor), and Supabase-CLI migration conventions (`db reset` / `db diff`). The remaining gaps are OAuth logins' provider variety, MFA polish, and pgvector (needs an extension binary).
 
 ## Known gaps
 
 - `postgres_changes` applies RLS per subscriber for INSERT/UPDATE (the row is re-checked by primary key as that user). DELETE events can't be re-queried (the row is gone), so they are delivered to authenticated/service subscribers but not filtered per-row — hosted Supabase does this via WAL-level policy evaluation (WALRUS).
 - Spread embeds (`...rel(col)`) support flat column lists only; aggregate functions in `select` are not implemented.
-- Auth: OAuth works for any OAuth2/OIDC provider (Google & GitHub have built-in presets; configure via `TINBASE_OAUTH_<PROVIDER>_CLIENT_ID`/`_CLIENT_SECRET`). Still missing: MFA, SSO/SAML, phone auth. OTP/magic-link/recovery emails go through a pluggable `mailer` (default logs to console).
+- Auth: OAuth works for any OAuth2/OIDC provider (Google & GitHub have built-in presets; configure via `TINBASE_OAUTH_<PROVIDER>_CLIENT_ID`/`_CLIENT_SECRET`). Still missing: MFA, SSO/SAML, Twilio Verify / WhatsApp / the `send_sms` hook. OTP/magic-link/recovery emails go through a pluggable `mailer`, SMS codes through a pluggable `smsSender` (both default to the dev inbox).
 - `pg_notify` payloads cap at ~8 kB - realtime events for larger rows arrive with `record: null` and an `errors` entry, like Supabase's "payload too large".
 - One writer at a time: PGlite is single-connection, and the native engine currently serializes requests over one connection for parity (a connection pool is a straightforward future upgrade). Fine for dev tools and small apps, not for high-concurrency production.
 

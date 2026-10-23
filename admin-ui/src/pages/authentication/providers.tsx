@@ -1,4 +1,4 @@
-import { ExternalLink, Globe, Inbox, KeyRound, Mail, UserRound } from 'lucide-react'
+import { ExternalLink, Globe, Inbox, KeyRound, Mail, Smartphone, UserRound } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, type AuthSettings } from '../../api'
 import { Badge, Input, Spinner, Switch, toast } from '../../components/ui'
@@ -7,6 +7,7 @@ import { apiUrl } from '../../lib/snippet'
 interface Config {
   providers: string[]
   inbox: boolean
+  sms?: { custom: boolean; apiUrl: string }
   settings: AuthSettings | null
 }
 
@@ -39,6 +40,28 @@ export function ProvidersSection() {
       toast.error((e as Error).message)
     }
   }
+
+  /** One Twilio field. Only the field named travels, so the others (the secret above all) are kept. */
+  async function patchTwilio(field: 'accountSid' | 'authToken' | 'messageServiceSid', value: string) {
+    if (!settings) return
+    try {
+      const saved = await api.updateAuthSettings({ smsTwilio: { [field]: value } as AuthSettings['smsTwilio'] })
+      setConfig((c) => (c ? { ...c, settings: saved } : c))
+      toast.success('Saved')
+    } catch (e) {
+      toast.error((e as Error).message)
+    }
+  }
+
+  const phoneOn = settings?.phoneEnabled ?? false
+  const twilioConfigured = !!settings?.smsTwilio?.accountSid && !!settings?.smsTwilioAuthTokenSet
+  const smsApiHost = (() => {
+    try {
+      return new URL(config.sms?.apiUrl ?? 'https://api.twilio.com').host
+    } catch {
+      return config.sms?.apiUrl ?? 'api.twilio.com'
+    }
+  })()
 
   return (
     <div className="h-full overflow-y-auto">
@@ -80,6 +103,9 @@ export function ProvidersSection() {
           <ProviderRow icon={Mail} name="Email" description="Email/password, OTP codes, magic links, and password recovery.">
             <Badge variant="brand">Enabled</Badge>
           </ProviderRow>
+          <ProviderRow icon={Smartphone} name="Phone" description="signInWithOtp({ phone }), signUp({ phone, password }) and phone changes, confirmed by a texted code.">
+            <Switch checked={phoneOn} onChange={(on) => void patch({ phoneEnabled: on })} disabled={!settings} />
+          </ProviderRow>
           <ProviderRow icon={KeyRound} name="PKCE flows" description="OAuth and magic links support the PKCE flow out of the box.">
             <Badge variant="brand">Enabled</Badge>
           </ProviderRow>
@@ -87,6 +113,70 @@ export function ProvidersSection() {
             {settings?.anonymousUsers === false ? <Badge variant="neutral">Disabled</Badge> : <Badge variant="brand">Enabled</Badge>}
           </ProviderRow>
         </div>
+
+        {/* ── phone ── */}
+        {phoneOn && (
+          <>
+            <h2 className="mb-2 mt-8 text-sm font-medium text-foreground">Phone</h2>
+            <div className="divide-y divide-border rounded-md border border-border bg-card">
+              <SettingRow
+                title="Confirm phone"
+                description="Require users to verify their number with the texted code before a phone signup can sign in."
+              >
+                <Switch checked={settings ? !settings.smsAutoconfirm : false} onChange={(on) => void patch({ smsAutoconfirm: !on })} disabled={!settings} />
+              </SettingRow>
+              <SettingRow title="Code length" description="Digits in texted codes (6–10).">
+                <NumberInput value={settings?.smsOtpLength ?? 6} min={6} max={10} disabled={!settings} onSave={(n) => void patch({ smsOtpLength: n })} />
+              </SettingRow>
+              <SettingRow title="Code expiry (seconds)" description="How long a texted code stays valid.">
+                <NumberInput value={settings?.smsOtpExpirySeconds ?? 60} min={1} max={86400} disabled={!settings} onSave={(n) => void patch({ smsOtpExpirySeconds: n })} />
+              </SettingRow>
+              <SettingRow title="Minimum interval (seconds)" description="Shortest gap between texts to the same number. 0 turns the limit off.">
+                <NumberInput value={settings?.maxSmsFrequencySeconds ?? 60} min={0} max={3600} disabled={!settings} onSave={(n) => void patch({ maxSmsFrequencySeconds: n })} />
+              </SettingRow>
+            </div>
+
+            <h2 className="mb-2 mt-8 text-sm font-medium text-foreground">SMS provider</h2>
+            {config.sms?.custom ? (
+              <div className="flex items-center gap-3 rounded-md border border-border bg-card p-4">
+                <Smartphone size={16} className="shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] text-foreground">Custom sender</p>
+                  <p className="text-[11px] text-muted-foreground/80">An SMS sender was provided to createBackend; texts are delivered through it.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-md border border-border bg-card">
+                <div className="flex items-center gap-3 border-b border-border p-4">
+                  <Smartphone size={16} className="shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <p className="flex items-center gap-2 text-[13px] text-foreground">
+                      Twilio
+                      {twilioConfigured ? <Badge variant="brand">configured</Badge> : <Badge variant="neutral">dev inbox</Badge>}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground/80">
+                      {twilioConfigured
+                        ? `Codes are sent through ${smsApiHost}.`
+                        : 'No credentials — texted codes are captured in the local inbox instead of being sent.'}{' '}
+                      The same fields as <code className="text-muted-foreground">[auth.sms.twilio]</code> in config.toml; a value here overrides it.
+                    </p>
+                  </div>
+                </div>
+                <div className="divide-y divide-border">
+                  <SettingRow title="Account SID" description="ACxxxxxxxx from the Twilio console.">
+                    <TextInput value={settings?.smsTwilio?.accountSid ?? ''} placeholder="AC…" disabled={!settings} onSave={(v) => void patchTwilio('accountSid', v)} />
+                  </SettingRow>
+                  <SettingRow title="Auth token" description={settings?.smsTwilioAuthTokenSet ? 'Set. Never shown again; paste a new one to replace it.' : 'The account auth token (secret).'}>
+                    <TextInput value="" placeholder={settings?.smsTwilioAuthTokenSet ? '••••••••' : 'auth token'} secret disabled={!settings} onSave={(v) => void patchTwilio('authToken', v)} />
+                  </SettingRow>
+                  <SettingRow title="Messaging Service SID" description="MGxxxxxxxx; the Messaging Service texts are sent through.">
+                    <TextInput value={settings?.smsTwilio?.messageServiceSid ?? ''} placeholder="MG…" disabled={!settings} onSave={(v) => void patchTwilio('messageServiceSid', v)} />
+                  </SettingRow>
+                </div>
+              </div>
+            )}
+          </>
+        )}
 
         {/* ── oauth providers ── */}
         <h2 className="mb-2 mt-8 text-sm font-medium text-foreground">OAuth providers</h2>
@@ -196,12 +286,16 @@ function ProviderRow({
 
 /** Small numeric input that saves on blur or Enter and snaps back on invalid values. */
 function MinLengthInput({ value, disabled, onSave }: { value: number; disabled?: boolean; onSave: (n: number) => void }) {
+  return <NumberInput value={value} min={4} max={72} disabled={disabled} onSave={onSave} />
+}
+
+function NumberInput({ value, min, max, disabled, onSave }: { value: number; min: number; max: number; disabled?: boolean; onSave: (n: number) => void }) {
   const [text, setText] = useState(String(value))
   useEffect(() => setText(String(value)), [value])
 
   function commit() {
     const n = parseInt(text, 10)
-    if (!Number.isFinite(n) || n < 4 || n > 72) {
+    if (!Number.isFinite(n) || n < min || n > max) {
       setText(String(value))
       return
     }
@@ -215,6 +309,50 @@ function MinLengthInput({ value, disabled, onSave }: { value: number; disabled?:
       value={text}
       disabled={disabled}
       onChange={(e) => setText(e.target.value.replace(/[^0-9]/g, ''))}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+    />
+  )
+}
+
+/**
+ * Text field that saves on blur or Enter when the value changed. A `secret`
+ * field is write-only: it starts empty whatever is stored, and is emptied
+ * again once saved, so the stored value is never on screen.
+ */
+function TextInput({
+  value,
+  placeholder,
+  secret,
+  disabled,
+  onSave,
+}: {
+  value: string
+  placeholder?: string
+  secret?: boolean
+  disabled?: boolean
+  onSave: (v: string) => void
+}) {
+  const [text, setText] = useState(value)
+  useEffect(() => setText(value), [value])
+
+  function commit() {
+    const v = text.trim()
+    if (v === value || (secret && v === '')) return
+    onSave(v)
+    if (secret) setText('')
+  }
+
+  return (
+    <Input
+      mono
+      type={secret ? 'password' : 'text'}
+      autoComplete="off"
+      className="w-64"
+      value={text}
+      placeholder={placeholder}
+      disabled={disabled}
+      onChange={(e) => setText(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
     />

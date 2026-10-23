@@ -455,6 +455,17 @@ SMTP (env, mirroring GOTRUE_SMTP_*):
 
 A project overrides all of the above with [auth.email.smtp] in
 supabase/config.toml (host, port, user, pass, admin_email, sender_name).
+
+SMS (env, filling any [auth.sms.twilio] field the project left empty):
+  TINBASE_SMS_TWILIO_ACCOUNT_SID
+  TINBASE_SMS_TWILIO_AUTH_TOKEN
+  TINBASE_SMS_TWILIO_MESSAGE_SERVICE_SID
+  TINBASE_SMS_TWILIO_API_URL  a Twilio-compatible gateway instead of
+                              api.twilio.com (a platform gateway that holds
+                              the real credential and meters each tenant)
+
+Phone auth itself is switched on by [auth.sms] enable_signup = true. Without
+credentials the codes land in the dev inbox at /inbox and are never sent.
   TINBASE_SITE_URL        public URL of the APP: the default redirect for
                           emailed links (overrides config.toml auth.site_url
                           and the bound address)
@@ -820,6 +831,51 @@ async function main(): Promise<void> {
     }
   }
 
+  // Phone OTP: Supabase's [auth.sms.twilio] block, with TINBASE_SMS_TWILIO_*
+  // filling any field the project left empty. Env exists for the same reason
+  // as TINBASE_SMTP_*: a platform configures containers through the
+  // environment, and here it points every tenant's "Twilio" at its own gateway
+  // (api_url) with the tenant's key as the auth token - the gateway holds the
+  // real Twilio credential, so no container does. A project with its own
+  // account fills the block itself and the env is never consulted.
+  //
+  // `enabled = false` in the block switches the provider off outright; absent,
+  // credentials from either source are used. Missing credentials are not a
+  // startup error: phone auth is off unless [auth.sms] enable_signup turns it
+  // on, and when it is on with nothing to send through, the texts land in the
+  // dev inbox (or are logged as unsent) - the same posture as mail.
+  const twilioCfg = cfg.auth.smsTwilio ?? {}
+  const twilioEnabled = twilioCfg.enabled !== false
+  const smsTwilio = twilioEnabled
+    ? {
+        accountSid: twilioCfg.accountSid || process.env.TINBASE_SMS_TWILIO_ACCOUNT_SID || '',
+        authToken: twilioCfg.authToken || process.env.TINBASE_SMS_TWILIO_AUTH_TOKEN || '',
+        messageServiceSid: twilioCfg.messageServiceSid || process.env.TINBASE_SMS_TWILIO_MESSAGE_SERVICE_SID || '',
+      }
+    : { accountSid: '', authToken: '', messageServiceSid: '' }
+  const smsApiUrl = twilioCfg.apiUrl || process.env.TINBASE_SMS_TWILIO_API_URL || undefined
+  if (smsApiUrl !== undefined) {
+    try {
+      new URL(smsApiUrl)
+    } catch {
+      console.error(`auth.sms.twilio.api_url / TINBASE_SMS_TWILIO_API_URL is not a valid URL: ${smsApiUrl}`)
+      process.exit(1)
+    }
+  }
+  if (twilioCfg.enabled === true && (!smsTwilio.accountSid || !smsTwilio.authToken)) {
+    console.error(
+      'auth.sms.twilio: enabled, but account_sid / auth_token are empty and TINBASE_SMS_TWILIO_ACCOUNT_SID / ' +
+        '_AUTH_TOKEN are not set. Phone OTP codes will not be delivered until they are.'
+    )
+  }
+  const smsDescription = !cfg.auth.settings.phoneEnabled
+    ? 'off ([auth.sms] enable_signup = false)'
+    : smsTwilio.accountSid && smsTwilio.authToken
+      ? `Twilio via ${new URL(smsApiUrl ?? 'https://api.twilio.com').host}${twilioCfg.accountSid ? '' : ' [env]'}`
+      : isNetworkExposed(opts.host)
+        ? 'NOT CONFIGURED - no SMS is sent, and /inbox is off on a network-exposed host'
+        : 'dev inbox (not delivered)'
+
   // Load the bodies named by [auth.email.template.*].content_path. Read here
   // rather than in load-config because that module is shared with the browser
   // build, which has no filesystem. A missing or unreadable file is a startup
@@ -894,7 +950,9 @@ async function main(): Promise<void> {
     jwtExpiry: cfg.auth.jwtExpiry,
     uriAllowList,
     authEnabled: cfg.auth.enabled,
-    authSettings: cfg.auth.settings,
+    authSettings: { ...cfg.auth.settings, smsTwilio },
+    smsApiUrl,
+    smsTemplate: cfg.auth.smsTemplate,
     authRateLimits: cfg.auth.rateLimits,
     sessionTimeboxSeconds: cfg.auth.sessionTimeboxSeconds,
     oauthProviders: cfg.auth.oauthProviders,
@@ -953,6 +1011,7 @@ async function main(): Promise<void> {
           Admin UI: ${server.url}/_/
              Email: ${sendEmailHook || mailer ? mailDescription : isNetworkExposed(opts.host) ? 'NOT CONFIGURED - no auth email is sent, and /inbox is off on a network-exposed host' : `dev inbox at ${server.url}/inbox (not delivered)`}
     Mail templates: ${Object.keys(emailTemplates).length ? Object.keys(emailTemplates).join(', ') : 'built-in defaults'}
+               SMS: ${smsDescription}
           Site URL: ${siteUrl}${apiExternalUrl === siteUrl ? '' : `\n      API external: ${apiExternalUrl}`}
     Redirects to: ${uriAllowList.length ? uriAllowList.join(', ') : 'the site URL origin only'}
             Engine: ${opts.engine === 'native' ? `native postgres (${dataDir})` : opts.engine === 'pgmem' ? 'pg-mem (in-memory, lite)' : `PGlite (${opts.memory ? 'in-memory' : dataDir})`}

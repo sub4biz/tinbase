@@ -235,6 +235,30 @@ export const SCENARIOS: Scenario[] = [
     expect: (r) => ok(r) && r.movedTo,
   },
 
+  // ── Auth: phone ──
+  //
+  // Both sides ship with phone auth off (Supabase's config.toml default is
+  // `[auth.sms] enable_signup = false`), so what can be compared without an
+  // SMS provider is the refusal - and that a bare code is never a credential.
+  {
+    name: 'phone sign-in is refused while phone auth is off',
+    module: 'auth',
+    run: async ({ anon }) => {
+      const r = await anon.auth.signInWithOtp({ phone: '+15005550006' })
+      return { error: r.error, status: r.error?.status }
+    },
+    expect: (r) => !!r.error,
+  },
+  {
+    name: 'a bare SMS code with no number yields no session',
+    module: 'auth',
+    run: async ({ anon }) => {
+      const r = await anon.auth.verifyOtp({ phone: '+15005550006', token: '123456', type: 'sms' })
+      return { hasSession: !!r.data.session, error: r.error }
+    },
+    expect: (r) => !!r.error && !r.hasSession,
+  },
+
   // ── Storage ──
   {
     name: 'bucket + upload + download',
