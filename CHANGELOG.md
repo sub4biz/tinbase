@@ -6,6 +6,11 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A phone OTP whose text the provider refused left its code redeemable; the code is now
+  discarded with the failed send, as GoTrue does.
+
 ## [0.21.0]
 
 ### Added

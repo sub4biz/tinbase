@@ -1502,6 +1502,10 @@ export class AuthHandler {
     try {
       messageId = await this.config.smsSender.send({ to: e164(phone), body })
     } catch (e) {
+      // Nobody received the code, so nothing should be redeemable: GoTrue rolls
+      // the token back with the failed send. Seen live (staging, 2026-10-23): a
+      // refused send still left a row that `/verify` accepted.
+      await this.db.query(`delete from auth.one_time_tokens where phone = $1 and token_type = $2 and token = $3`, [phone, tokenType, code])
       // GoTrue's shape for a provider that refused the text (bad number, over
       // the provider's limit, unreachable): the caller learns why, under the
       // code supabase-js clients already handle, rather than a bare 500.
