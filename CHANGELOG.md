@@ -6,6 +6,8 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.21.2]
+
 ### Fixed
 
 - Storage downloads ignored `Range` and always answered 200 with the whole object. Public,
