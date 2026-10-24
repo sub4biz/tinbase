@@ -294,6 +294,7 @@ export class StorageHandler {
   async handle(req: Request, ctx: RequestContext, url: URL): Promise<Response> {
     const rest = url.pathname.replace(/^\/storage\/v1\/?/, '').replace(/\/+$/, '')
     const method = req.method.toUpperCase()
+    const range = req.headers.get('range')
 
     try {
       // ── buckets ──
@@ -323,13 +324,13 @@ export class StorageHandler {
         const bucket = parts[3]
         const key = parts.slice(4).join('/')
         if (kind === 'public' && (method === 'GET' || method === 'HEAD')) {
-          return await this.downloadPublic(bucket, key, method === 'HEAD')
+          return await this.downloadPublic(bucket, key, method === 'HEAD', range)
         }
         if (kind === 'authenticated' && (method === 'GET' || method === 'HEAD')) {
-          return await this.download(ctx, bucket, key, method === 'HEAD')
+          return await this.download(ctx, bucket, key, method === 'HEAD', range)
         }
         if (kind === 'sign' && method === 'GET') {
-          return await this.redeemSignedUrl(url, bucket, key)
+          return await this.redeemSignedUrl(url, bucket, key, range)
         }
         return storageError(404, 'not_found', `unknown render endpoint: ${rest}`)
       }
@@ -343,10 +344,10 @@ export class StorageHandler {
         return await this.listObjects(req, ctx, parts[2])
       }
       if (parts[1] === 'public' && parts.length >= 4 && (method === 'GET' || method === 'HEAD')) {
-        return await this.downloadPublic(parts[2], parts.slice(3).join('/'), method === 'HEAD')
+        return await this.downloadPublic(parts[2], parts.slice(3).join('/'), method === 'HEAD', range)
       }
       if (parts[1] === 'authenticated' && parts.length >= 4 && (method === 'GET' || method === 'HEAD')) {
-        return await this.download(ctx, parts[2], parts.slice(3).join('/'), method === 'HEAD')
+        return await this.download(ctx, parts[2], parts.slice(3).join('/'), method === 'HEAD', range)
       }
       if (parts[1] === 'sign' && parts.length === 3 && method === 'POST') {
         return await this.signUrls(req, ctx, parts[2])
@@ -355,7 +356,7 @@ export class StorageHandler {
         return await this.signUrl(req, ctx, parts[2], parts.slice(3).join('/'))
       }
       if (parts[1] === 'sign' && parts.length >= 4 && method === 'GET') {
-        return await this.redeemSignedUrl(url, parts[2], parts.slice(3).join('/'))
+        return await this.redeemSignedUrl(url, parts[2], parts.slice(3).join('/'), range)
       }
       if (parts[1] === 'upload' && parts[2] === 'sign' && parts.length >= 5) {
         const bucket = parts[3]
@@ -373,7 +374,7 @@ export class StorageHandler {
       if (key === '' && method === 'DELETE') return await this.removeObjects(req, ctx, bucket)
       if (key !== '') {
         if (method === 'POST' || method === 'PUT') return await this.upload(req, ctx, bucket, key)
-        if (method === 'GET' || method === 'HEAD') return await this.download(ctx, bucket, key, method === 'HEAD')
+        if (method === 'GET' || method === 'HEAD') return await this.download(ctx, bucket, key, method === 'HEAD', range)
         if (method === 'DELETE') return await this.removeOne(ctx, bucket, key)
       }
       return storageError(404, 'not_found', `unknown storage endpoint: ${rest}`)
@@ -766,16 +767,22 @@ export class StorageHandler {
     return undefined
   }
 
-  private async download(ctx: RequestContext, bucketId: string, key: string, head: boolean): Promise<Response> {
+  private async download(
+    ctx: RequestContext,
+    bucketId: string,
+    key: string,
+    head: boolean,
+    range: string | null
+  ): Promise<Response> {
     const res = await this.db.withContext(ctx, (q) =>
       q(`select * from storage.objects where bucket_id = $1 and name = $2`, [bucketId, key])
     )
     const row = res.rows[0] as ObjectRow | undefined
     if (!row) return storageError(404, 'not_found', 'Object not found')
-    return this.serveObject(row, bucketId, key, head)
+    return this.serveObject(row, bucketId, key, head, range)
   }
 
-  private async downloadPublic(bucketId: string, key: string, head: boolean): Promise<Response> {
+  private async downloadPublic(bucketId: string, key: string, head: boolean, range: string | null): Promise<Response> {
     const bucket = await this.loadBucket(bucketId)
     if (!bucket?.public) return storageError(400, 'not_found', 'Bucket is not public')
     const res = await this.db.query(`select * from storage.objects where bucket_id = $1 and name = $2`, [
@@ -784,17 +791,39 @@ export class StorageHandler {
     ])
     const row = res.rows[0] as ObjectRow | undefined
     if (!row) return storageError(404, 'not_found', 'Object not found')
-    return this.serveObject(row, bucketId, key, head)
+    return this.serveObject(row, bucketId, key, head, range)
   }
 
-  private async serveObject(row: ObjectRow, bucketId: string, key: string, head: boolean): Promise<Response> {
-    const bytes = await this.driver.get(`${bucketId}/${key}`)
-    if (bytes === null) return storageError(404, 'not_found', 'Object not found')
+  /**
+   * Answer a download. Honours a single `Range: bytes=…` (206 with only those
+   * bytes, or 416 when it starts past the end), which Safari requires before it
+   * will play <audio>/<video>; anything else gets the whole object (200).
+   */
+  private async serveObject(
+    row: ObjectRow,
+    bucketId: string,
+    key: string,
+    head: boolean,
+    range: string | null
+  ): Promise<Response> {
+    const path = `${bucketId}/${key}`
+    // Learn the size without reading the bytes when the driver can, so a HEAD
+    // or a ranged read of a large object does not load all of it.
+    let bytes: Uint8Array | null = null
+    let size: number | null
+    if (this.driver.size && (head || range !== null)) {
+      size = await this.driver.size(path)
+    } else {
+      bytes = await this.driver.get(path)
+      size = bytes?.length ?? null
+    }
+    if (size === null) return storageError(404, 'not_found', 'Object not found')
     const meta = row.metadata ?? {}
     const contentType = String(meta.mimetype ?? 'application/octet-stream')
     const headers: Record<string, string> = {
       'content-type': contentType,
-      'content-length': String(bytes.length),
+      'content-length': String(size),
+      'accept-ranges': 'bytes',
       'cache-control': String(meta.cacheControl ?? 'no-cache'),
       etag: String(meta.eTag ?? '""'),
       'last-modified': new Date(String(meta.lastModified ?? Date.now())).toUTCString(),
@@ -804,6 +833,34 @@ export class StorageHandler {
     // The content-type is attacker-controlled at upload time; force active
     // content to download instead of rendering same-origin (stored-XSS guard).
     if (isRenderableActiveType(contentType)) headers['content-disposition'] = 'attachment'
+
+    const span = range === null ? null : parseByteRange(range, size)
+    if (span === 'unsatisfiable') {
+      return new Response(null, {
+        status: 416,
+        headers: { ...headers, 'content-length': '0', 'content-range': `bytes */${size}` },
+      })
+    }
+    if (span) {
+      const [start, end] = span
+      headers['content-length'] = String(end - start + 1)
+      headers['content-range'] = `bytes ${start}-${end}/${size}`
+      let body: Uint8Array | null = null
+      if (!head) {
+        body = bytes
+          ? bytes.subarray(start, end + 1)
+          : this.driver.getRange
+            ? await this.driver.getRange(path, start, end)
+            : ((await this.driver.get(path))?.subarray(start, end + 1) ?? null)
+        if (body === null) return storageError(404, 'not_found', 'Object not found')
+      }
+      return new Response(body as BodyInit | null, { status: 206, headers })
+    }
+    if (!head && bytes === null) {
+      bytes = await this.driver.get(path)
+      if (bytes === null) return storageError(404, 'not_found', 'Object not found')
+      headers['content-length'] = String(bytes.length)
+    }
     return new Response(head ? null : (bytes as BodyInit), { status: 200, headers })
   }
 
@@ -1014,7 +1071,7 @@ export class StorageHandler {
     return json(200, out)
   }
 
-  private async redeemSignedUrl(url: URL, bucketId: string, key: string): Promise<Response> {
+  private async redeemSignedUrl(url: URL, bucketId: string, key: string, range: string | null): Promise<Response> {
     const token = url.searchParams.get('token') ?? ''
     const claims = await verifyJwt(token, this.config.jwtSecret)
     if (!claims || claims.url !== `${bucketId}/${key}` || claims.type !== 'download') {
@@ -1026,7 +1083,7 @@ export class StorageHandler {
     ])
     const row = res.rows[0] as ObjectRow | undefined
     if (!row) return storageError(404, 'not_found', 'Object not found')
-    return this.serveObject(row, bucketId, key, false)
+    return this.serveObject(row, bucketId, key, false, range)
   }
 
   private async signUploadUrl(ctx: RequestContext, bucketId: string, key: string): Promise<Response> {
@@ -1067,6 +1124,27 @@ export class StorageHandler {
     const now = Math.floor(Date.now() / 1000)
     return signJwt({ type, url: `${bucketId}/${key}`, iat: now, exp: now + clampExpiry(expiresIn), owner }, this.config.jwtSecret)
   }
+}
+
+/**
+ * Resolve a `Range` header against an object of `size` bytes to an inclusive
+ * [start, end], as RFC 9110 §14 reads it: `bytes=a-b`, `bytes=a-` or the suffix
+ * `bytes=-n`. Returns null when the header should be ignored (another unit,
+ * malformed, or several ranges, which are answered with the whole object) and
+ * 'unsatisfiable' when it is well formed but selects no byte.
+ */
+export function parseByteRange(header: string, size: number): [number, number] | 'unsatisfiable' | null {
+  const m = header.trim().match(/^bytes\s*=\s*(\d*)\s*-\s*(\d*)$/i)
+  if (!m || (m[1] === '' && m[2] === '')) return null
+  if (m[1] === '') {
+    const suffix = Number(m[2])
+    if (suffix === 0 || size === 0) return 'unsatisfiable'
+    return [Math.max(0, size - suffix), size - 1]
+  }
+  const start = Number(m[1])
+  if (m[2] !== '' && Number(m[2]) < start) return null
+  if (start >= size) return 'unsatisfiable'
+  return [start, m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1)]
 }
 
 function bucketJson(b: BucketRow): Record<string, unknown> {

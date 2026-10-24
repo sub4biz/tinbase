@@ -280,6 +280,17 @@ export interface StorageDriver {
   get(key: string): Promise<Uint8Array | null>
   delete(key: string): Promise<void>
   deleteMany(keys: string[]): Promise<void>
+  /**
+   * Optional: the object's size in bytes, or null if it does not exist. Lets a
+   * HEAD or a byte-range request learn the length without reading the bytes.
+   */
+  size?(key: string): Promise<number | null>
+  /**
+   * Optional: bytes `start`..`end` (inclusive) of an object, or null if it does
+   * not exist. Range requests use it to read only the slice they serve; a
+   * driver without it falls back to `get()` and a slice.
+   */
+  getRange?(key: string, start: number, end: number): Promise<Uint8Array | null>
 }
 
 /** Error carrying an HTTP status + JSON body, thrown by handlers and rendered as-is to the client. */
