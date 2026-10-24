@@ -19,6 +19,14 @@ export class MemoryStorageDriver implements StorageDriver {
     return this.files.get(key) ?? null
   }
 
+  async size(key: string): Promise<number | null> {
+    return this.files.get(key)?.length ?? null
+  }
+
+  async getRange(key: string, start: number, end: number): Promise<Uint8Array | null> {
+    return this.files.get(key)?.subarray(start, end + 1) ?? null
+  }
+
   async delete(key: string): Promise<void> {
     this.files.delete(key)
   }

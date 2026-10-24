@@ -6,6 +6,16 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Storage downloads ignored `Range` and always answered 200 with the whole object. Public,
+  authenticated, signed-URL and render downloads now answer a single `Range: bytes=a-b`,
+  `bytes=a-` or `bytes=-n` with 206 and `Content-Range`, an unsatisfiable range with 416
+  `Content-Range: bytes */size`, and send `Accept-Ranges: bytes`, as Supabase Storage does. Several
+  ranges in one request still get the whole object. `StorageDriver` gains optional `size()` and
+  `getRange()` so a HEAD or a ranged read need not load the object; the fs and memory drivers
+  implement both, and a driver without them falls back to `get()` and a slice.
+
 ## [0.21.1]
 
 ### Fixed

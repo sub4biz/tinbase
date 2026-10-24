@@ -130,7 +130,7 @@ const CORS_HEADERS: Record<string, string> = {
   'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD',
   'access-control-allow-headers':
     'authorization, apikey, content-type, prefer, accept, accept-profile, content-profile, range, x-upsert, x-client-info, x-supabase-api-version, cache-control',
-  'access-control-expose-headers': 'content-range, range-unit, content-profile',
+  'access-control-expose-headers': 'content-range, range-unit, content-profile, accept-ranges',
   'access-control-max-age': '86400',
 }
 
