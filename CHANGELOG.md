@@ -6,6 +6,8 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.22.0]
+
 ### Added
 
 - `tinbase db export -o <file>` writes a project's database, roles and stored files to one
