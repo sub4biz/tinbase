@@ -146,6 +146,29 @@ describe.skipIf(!NATIVE_SUPPORTED)('db export / import', () => {
     }
   })
 
+  it('hashes the same contents the same, and a write differently', { timeout: 180000 }, async () => {
+    const src = dirs()
+    const backend = await open(src.dataDir)
+    try {
+      const out = (n: number) => join(src.root, `e${n}.tar.gz`)
+      const a = await exportProject({ dataDir: src.dataDir, storageDir: src.storageDir, outFile: out(1) })
+      const b = await exportProject({ dataDir: src.dataDir, storageDir: src.storageDir, outFile: out(2) })
+      expect(a.manifest.contentHash).toMatch(/^[0-9a-f]{64}$/)
+      expect(b.manifest.contentHash).toBe(a.manifest.contentHash)
+
+      await backend.db.engine.query(`insert into items (name) values ('new')`)
+      const c = await exportProject({ dataDir: src.dataDir, storageDir: src.storageDir, outFile: out(3) })
+      expect(c.manifest.contentHash).not.toBe(a.manifest.contentHash)
+
+      mkdirSync(src.storageDir, { recursive: true })
+      writeFileSync(join(src.storageDir, 'f.txt'), 'x')
+      const d = await exportProject({ dataDir: src.dataDir, storageDir: src.storageDir, outFile: out(4) })
+      expect(d.manifest.contentHash).not.toBe(c.manifest.contentHash)
+    } finally {
+      await backend.close()
+    }
+  })
+
   it('exports from a running server and keeps a pristine database pristine', { timeout: 180000 }, async () => {
     const src = dirs()
     const backend = await open(src.dataDir)

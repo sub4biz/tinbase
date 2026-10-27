@@ -15,6 +15,7 @@
  * like any existing database.
  */
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -28,6 +29,8 @@ const run = promisify(execFile)
 
 export const DUMP_FORMAT = 'tinbase-dump'
 export const DUMP_VERSION = 1
+/** Where `tinbase start` looks for an archive to restore before it opens the database (relative to --dir). */
+export const RESTORE_FILE = join('.tinbase', 'restore.tar.gz')
 
 export interface DumpManifest {
   format: typeof DUMP_FORMAT
@@ -35,6 +38,12 @@ export interface DumpManifest {
   createdAt: string
   /** server_version of the database that was dumped */
   postgres: string
+  /**
+   * sha256 of the roles, the dump and every stored file (path and bytes). Equal
+   * hashes mean equal contents, so a host can skip keeping an archive identical
+   * to the last one; the archive bytes themselves differ by `createdAt`.
+   */
+  contentHash: string
   pristine: PristineState
 }
 
@@ -88,6 +97,33 @@ async function dirHasEntries(dir: string): Promise<boolean> {
   }
 }
 
+/** Every regular file under `dir`, as paths relative to it, sorted. */
+async function filesUnder(dir: string, rel = ''): Promise<string[]> {
+  const out: string[] = []
+  for (const e of await readdir(join(dir, rel), { withFileTypes: true })) {
+    const p = rel ? `${rel}/${e.name}` : e.name
+    if (e.isDirectory()) out.push(...(await filesUnder(dir, p)))
+    else if (e.isFile()) out.push(p)
+  }
+  return out.sort()
+}
+
+/** See {@link DumpManifest.contentHash}: roles, dump and stored files of a staged export. */
+async function contentHash(stage: string): Promise<string> {
+  const h = createHash('sha256')
+  for (const name of ['globals.sql', 'dump.sql']) {
+    // pg_dump brackets its output in \restrict / \unrestrict with a fresh random
+    // key every run (it stops a crafted dump from running psql meta-commands on
+    // restore), so those lines differ between dumps of the same database.
+    const sql = (await readFile(join(stage, name), 'utf8')).replace(/^\\(un)?restrict .*$/gm, '')
+    h.update(`${name}\0`).update(sql)
+  }
+  for (const p of await filesUnder(join(stage, 'storage'))) {
+    h.update(`storage/${p}\0`).update(await readFile(join(stage, 'storage', p)))
+  }
+  return h.digest('hex')
+}
+
 /** Export the database and stored files to `outFile`. */
 export async function exportProject(opts: ExportOptions): Promise<{ bytes: number; manifest: DumpManifest }> {
   const stage = await mkdtemp(join(tmpdir(), 'tb-export-'))
@@ -98,6 +134,8 @@ export async function exportProject(opts: ExportOptions): Promise<{ bytes: numbe
     await run(await pgTool('pg_dump'), [...conn, '-d', 'postgres', '-f', join(stage, 'dump.sql')], {
       maxBuffer: 16 * 1024 * 1024,
     })
+    await mkdir(join(stage, 'storage'), { recursive: true })
+    if (existsSync(opts.storageDir)) await cp(opts.storageDir, join(stage, 'storage'), { recursive: true })
     const version = await engine.query<{ v: string }>(`select current_setting('server_version') as v`)
     const pristine = await checkPristine(engine).catch(
       (e): PristineState => ({ pristine: false, state: 'unknown', reason: (e as Error)?.message ?? String(e) })
@@ -107,11 +145,10 @@ export async function exportProject(opts: ExportOptions): Promise<{ bytes: numbe
       version: DUMP_VERSION,
       createdAt: new Date().toISOString(),
       postgres: version.rows[0]?.v ?? '',
+      contentHash: await contentHash(stage),
       pristine,
     }
     await writeFile(join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
-    await mkdir(join(stage, 'storage'), { recursive: true })
-    if (existsSync(opts.storageDir)) await cp(opts.storageDir, join(stage, 'storage'), { recursive: true })
 
     await run('tar', ['-czf', opts.outFile, '-C', stage, '.'])
     return { bytes: (await stat(opts.outFile)).size, manifest }

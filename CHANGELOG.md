@@ -17,6 +17,14 @@ All notable changes to tinbase are documented here. The format follows
 - `tinbase db import <file> [--force]` creates the database from such an archive. It loads into a
   new cluster beside the data directory and swaps it in only once everything loaded, so a bad
   archive or a failed load leaves the existing database and storage as they were.
+- `tinbase start` restores an export left at `<dir>/.tinbase/restore.tar.gz` before it opens the
+  database, then removes it. A host whose server runs as a container's main process restores
+  that way: wipe the data directory, leave the archive, start. An archive that does not load
+  stops startup (and stays for the next attempt) rather than letting a fresh database serve in
+  place of the restored one.
+- The export manifest carries `contentHash`, a sha256 of the roles, the dump and every stored
+  file. Two exports of an unchanged database hash the same (pg_dump's per-run `\restrict` key is
+  left out), so a host can skip keeping an archive identical to the last one.
 - Seed snapshots, and `tinbase db pristine`: whether a database still holds only what its
   migrations and seed put there. The snapshot is taken when a database is created and moves
   forward whenever migrations or the seed apply to a database that still matches it; once anything

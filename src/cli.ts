@@ -8,12 +8,12 @@
  *   tinbase keys      print anon/service_role keys for the JWT secret
  */
 import { mkdir, rm, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createBackend, generateTypes, createPgmemEngine, inspectDb } from './index.js'
 import { computeDbDiff, pullSchema, shadowNativeDataDir } from './node/db-diff.js'
 import { attachNativeEngine, createNativeEngine, readRunningPostmaster } from './node/native/engine.js'
-import { exportProject, importProject } from './node/native/dump.js'
+import { exportProject, importProject, RESTORE_FILE } from './node/native/dump.js'
 import { checkPristine } from './db/pristine.js'
 import type { DbEngine } from './db/engine.js'
 import { readServerLock, removeServerLock, writeServerLock, type ServerLock } from './node/server-lock.js'
@@ -732,6 +732,30 @@ async function main(): Promise<void> {
   // `start` has to own its postmaster; migrate/status only read, so they attach to
   // one already running rather than failing on the data-directory lock.
   const readOnlyCommand = opts.command === 'migrate' || opts.command === 'status'
+
+  // A host restores a project by leaving an export archive at .tinbase/restore.tar.gz
+  // and starting the server: it is loaded before anything opens the database. A
+  // failed load stops startup instead of serving a fresh database in its place,
+  // and the archive stays for the next attempt.
+  const restoreFile = join(opts.dir, RESTORE_FILE)
+  if (opts.command === 'start' && opts.engine === 'native' && !opts.databaseUrl && existsSync(restoreFile)) {
+    console.log(`  restoring from ${restoreFile}`)
+    try {
+      const m = await importProject({
+        dataDir: dataDir!,
+        storageDir: opts.storageDir,
+        file: restoreFile,
+        force: true,
+        log: (msg) => console.log(`  ${msg}`),
+      })
+      await rm(restoreFile, { force: true })
+      console.log(`  restored (dumped ${m.createdAt} from Postgres ${m.postgres})`)
+    } catch (e) {
+      console.error(`\n  ✖ restore failed: ${(e as Error)?.message ?? e}\n    ${restoreFile} was kept.\n`)
+      process.exit(1)
+    }
+  }
+
   if (readOnlyCommand) {
     if (await runViaServer(opts)) return
     refuseIfUnshareableServer(opts, opts.command)

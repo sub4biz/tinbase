@@ -75,6 +75,7 @@ tinbase db diff    # DDL for schema changes not yet in migrations (-f <name> to 
 tinbase db export  # database, roles and stored files to a small archive (-o <file>; native engine, works while serving)
 tinbase db import  # create the database from such an archive (<file>; --force replaces a stopped one)
 tinbase db pristine # does the database still hold only what migrations and seed put there? (exit 0 yes, 3 no)
+                   # start restores an export left at <dir>/.tinbase/restore.tar.gz before opening the database
 
   -p, --port <n>        port (default 54321; or TINBASE_PORT / PORT env)
       --dir <path>      project dir containing supabase/ (default cwd)
