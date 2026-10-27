@@ -6,6 +6,34 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `tinbase db export -o <file>` writes a project's database, roles and stored files to one
+  archive: `pg_dump` and `pg_dumpall --globals-only --no-role-passwords`, plus the storage
+  directory and a manifest. It works against a running server (`pg_dump` reads one consistent
+  snapshot, so nothing stops) or starts Postgres briefly when none is running. A seed-only project
+  exports to about 11 KB, where a copy of its data directory is tens of MB, and the archive still
+  loads after a Postgres major upgrade. Native engine only.
+- `tinbase db import <file> [--force]` creates the database from such an archive. It loads into a
+  new cluster beside the data directory and swaps it in only once everything loaded, so a bad
+  archive or a failed load leaves the existing database and storage as they were.
+- `tinbase start` restores an export left at `<dir>/.tinbase/restore.tar.gz` before it opens the
+  database, then removes it. A host whose server runs as a container's main process restores
+  that way: wipe the data directory, leave the archive, start. An archive that does not load
+  stops startup (and stays for the next attempt) rather than letting a fresh database serve in
+  place of the restored one.
+- The export manifest carries `contentHash`, a sha256 of the roles, the dump and every stored
+  file. Two exports of an unchanged database hash the same (pg_dump's per-run `\restrict` key is
+  left out), so a host can skip keeping an archive identical to the last one.
+- Seed snapshots, and `tinbase db pristine`: whether a database still holds only what its
+  migrations and seed put there. The snapshot is taken when a database is created and moves
+  forward whenever migrations or the seed apply to a database that still matches it; once anything
+  else writes (a row in an app table, a new account, an upload, a bucket, a cron job, a vault
+  secret, a schema change outside migrations) it is marked diverged for good. Sign-ins, sessions
+  and audit rows do not count. A host can drop a pristine database instead of keeping a backup
+  of it. Databases created before this release report `diverged` (`existed before tinbase
+  recorded seed snapshots`), since nothing says what in them came from the files.
+
 ## [0.21.2]
 
 ### Fixed
