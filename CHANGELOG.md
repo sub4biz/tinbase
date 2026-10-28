@@ -6,6 +6,8 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.22.1]
+
 ### Fixed
 
 - Startup no longer says `postgres is starting up (crash recovery)` on every start. Postgres
