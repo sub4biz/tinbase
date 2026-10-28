@@ -6,6 +6,13 @@ All notable changes to tinbase are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Startup no longer says `postgres is starting up (crash recovery)` on every start. Postgres
+  answers "starting up" for the first moments of any start, so tinbase now prints `postgres is
+  starting up; waiting…`, and `postgres is recovering from an unclean shutdown; waiting…` only once
+  Postgres's own log says it is recovering.
+
 ## [0.22.0]
 
 ### Added
